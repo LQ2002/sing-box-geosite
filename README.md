@@ -10,7 +10,8 @@ https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/c
 
 ## 仓库机器人权限  
 
-仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上
+仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上  
+---
 
 # 致谢（排名不分先后）
 
