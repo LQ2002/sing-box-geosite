@@ -6,16 +6,6 @@
 
 规则集源文件写法eg:
 
-```json
-{
-  "tag": "geosite-wechat",
-  "type": "remote",
-  "format": "source",
-  "url": "https://raw.githubusercontent.com/Toperlock/sing-box-geosite/main/wechat.json",
-  "download_detour": "auto"
-}
-```
-
 # 致谢（排名不分先后）
 
 [@izumiChan16](https://github.com/izumiChan16)
