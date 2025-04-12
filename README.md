@@ -7,7 +7,7 @@
 ```
 https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock
 ```
----  
+
 ## 仓库机器人权限  
 
 仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上
