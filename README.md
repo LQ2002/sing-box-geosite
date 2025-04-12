@@ -4,7 +4,7 @@
 ---
 ## 格式：规则链接 文件名称
 
-https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock  
+[https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock]  
 ---  
 ## 仓库机器人权限  
 
