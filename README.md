@@ -22,4 +22,8 @@ https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/c
 
 [@blackmatrix7](https://github.com/blackmatrix7)
 
-[@DivineEngine](https://github.com/DivineEngine)
+[@DivineEngine](https://github.com/DivineEngine)  
+
+[@Toperlock](https://github.com/Toperlock/sing-box-geosite)  
+
+[Claude](https://claude.ai)
