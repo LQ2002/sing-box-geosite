@@ -1,10 +1,10 @@
 # sing-box-geosite
 
 在links.txt添加规则集，自动生成 sing-box Source Format。fork后自己添加想要转换的规则集。
+**格式：规则链接 文件名称**
+https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock
 
 仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上
-
-规则集源文件写法eg:
 
 # 致谢（排名不分先后）
 
