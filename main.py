@@ -339,10 +339,33 @@ def read_links_file():
     links = []
     custom_names = {}
     
+    # 尝试多个可能的路径
+    possible_paths = [
+        "links.txt",                    # 当前目录
+        "../links.txt",                 # 上级目录
+        os.path.join(os.getcwd(), "links.txt"),  # 绝对路径
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "links.txt"),  # 脚本所在目录
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "links.txt")  # 脚本所在目录的上级
+    ]
+    
+    file_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            file_path = path
+            break
+    
+    if not file_path:
+        print(f"找不到links.txt文件，尝试过以下路径: {possible_paths}")
+        print(f"当前工作目录: {os.getcwd()}")
+        print(f"目录内容: {os.listdir('.')}")
+        return [], {}
+    
     try:
-        with open("links.txt", 'r', encoding='utf-8') as links_file:
+        with open(file_path, 'r', encoding='utf-8') as links_file:
             link_lines = links_file.read().splitlines()
             
+        print(f"成功读取文件: {file_path}")
+        
         for line in link_lines:
             line = line.strip()
             if line and not line.startswith("#"):
@@ -363,10 +386,33 @@ def read_custom_config():
     """读取Custom.config文件，返回域名/IP和规则名称的映射"""
     custom_entries = {}
     
+    # 尝试多个可能的路径
+    possible_paths = [
+        "Custom.config",                    # 当前目录
+        "../Custom.config",                 # 上级目录
+        os.path.join(os.getcwd(), "Custom.config"),  # 绝对路径
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "Custom.config"),  # 脚本所在目录
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Custom.config")  # 脚本所在目录的上级
+    ]
+    
+    file_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            file_path = path
+            break
+    
+    if not file_path:
+        print(f"找不到Custom.config文件，尝试过以下路径: {possible_paths}")
+        print(f"当前工作目录: {os.getcwd()}")
+        print(f"目录内容: {os.listdir('.')}")
+        return {}
+    
     try:
-        with open("Custom.config", 'r', encoding='utf-8') as config_file:
+        with open(file_path, 'r', encoding='utf-8') as config_file:
             config_lines = config_file.read().splitlines()
             
+        print(f"成功读取文件: {file_path}")
+        
         for line in config_lines:
             line = line.strip()
             if line and not line.startswith("#"):
@@ -385,6 +431,10 @@ def read_custom_config():
         return {}
 
 def main():
+    # 显示当前目录结构，帮助调试
+    print(f"当前工作目录: {os.getcwd()}")
+    print(f"目录内容: {os.listdir('.')}")
+    
     # 读取links.txt
     links, custom_names = read_links_file()
     
@@ -395,7 +445,9 @@ def main():
     # 读取Custom.config
     custom_entries = read_custom_config()
     
+    # 确保输出目录存在
     output_dir = "./"
+    os.makedirs(output_dir, exist_ok=True)
     result_file_names = []
     
     for link in links:
