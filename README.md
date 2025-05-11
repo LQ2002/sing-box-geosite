@@ -8,6 +8,11 @@
 https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock
 ```
 
+## 在Custom.config里添加域名/ip和规则链接名称  
+```
+dns.wechat.com BlockHttpDNS
+```
+
 ## 仓库机器人权限  
 
 仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上  
