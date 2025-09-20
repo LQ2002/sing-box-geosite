@@ -2,3 +2,4 @@ https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/c
 https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/BlockHttpDNS/BlockHttpDNS.yaml BlockHttpDNS
 https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Clash.yaml Ads_AWAvenue
 https://ruleset.skk.moe/Clash/domainset/reject_extra.txt Ads_SKK
+https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/AliPay/AliPay.yaml Alipay
