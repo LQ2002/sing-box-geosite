@@ -26,12 +26,104 @@ def read_yaml_from_url(url):
         print(f"读取YAML失败: {url}, 错误: {str(e)}")
         return None
 
+def parse_hosts_format(content):
+    """
+    解析hosts格式的内容
+    hosts格式: IP地址 域名 [域名...]
+    例如: 0.0.0.0 example.com www.example.com
+    """
+    rows = []
+    lines = content.strip().splitlines()
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行和注释行
+        if not line or line.startswith('#'):
+            continue
+        
+        # 分割行内容
+        parts = line.split()
+        
+        if len(parts) < 2:
+            continue
+        
+        # 第一部分应该是IP地址
+        ip_part = parts[0]
+        
+        # 验证是否是有效的IP地址
+        try:
+            ipaddress.ip_address(ip_part)
+            # 如果是有效IP，后面的都是域名
+            domains = parts[1:]
+            
+            for domain in domains:
+                # 清理域名（移除可能的注释）
+                domain = domain.split('#')[0].strip()
+                if domain:
+                    rows.append({
+                        'pattern': 'DOMAIN',
+                        'address': domain,
+                        'other': None
+                    })
+        except ValueError:
+            # 如果第一部分不是IP地址，跳过这行
+            continue
+    
+    if rows:
+        return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
+    else:
+        return pd.DataFrame(columns=['pattern', 'address', 'other'])
+
+def is_hosts_format(content):
+    """
+    判断内容是否为hosts格式
+    hosts格式的特征：
+    1. 行以IP地址开头（0.0.0.0, 127.0.0.1等）
+    2. IP地址后跟一个或多个域名
+    """
+    lines = content.strip().splitlines()
+    
+    # 至少检查前10行非注释行
+    valid_hosts_lines = 0
+    checked_lines = 0
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行和注释
+        if not line or line.startswith('#'):
+            continue
+        
+        checked_lines += 1
+        if checked_lines > 10:
+            break
+        
+        parts = line.split()
+        if len(parts) >= 2:
+            try:
+                # 检查第一部分是否是IP地址
+                ipaddress.ip_address(parts[0])
+                valid_hosts_lines += 1
+            except ValueError:
+                pass
+    
+    # 如果至少有3行符合hosts格式，就认为是hosts文件
+    return valid_hosts_lines >= 3
+
 def read_list_from_url(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             try:
+                # 首先检查是否是hosts格式
+                if is_hosts_format(response.text):
+                    print(f"检测到hosts格式: {url}")
+                    df = parse_hosts_format(response.text)
+                    return df, []
+                
+                # 原有的CSV解析逻辑
                 csv_data = StringIO(response.text)
                 df = pd.read_csv(csv_data, header=None, names=['pattern', 'address', 'other', 'other2', 'other3'], on_bad_lines='skip')
                 
