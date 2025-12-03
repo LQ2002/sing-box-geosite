@@ -235,6 +235,8 @@ def parse_and_convert_to_dataframe(link):
                 print(f"解析YAML/TXT失败: {link}, 错误: {str(e)}")
                 df, rules = read_list_from_url(link)
         else:
+            # 对于没有扩展名或其他扩展名的文件，直接调用read_list_from_url
+            # 该函数会自动检测是否为hosts格式
             df, rules = read_list_from_url(link)
         
         # 确保df不为None
