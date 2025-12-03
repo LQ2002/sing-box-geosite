@@ -32,4 +32,6 @@ dns.wechat.com BlockHttpDNS
 
 [@Toperlock](https://github.com/Toperlock/sing-box-geosite)  
 
-[Claude](https://claude.ai)
+[@Claude](https://claude.ai)
+
+[@ShadowWhisperer](https://github.com/ShadowWhisperer)
