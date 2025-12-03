@@ -26,7 +26,63 @@ def read_yaml_from_url(url):
         print(f"读取YAML失败: {url}, 错误: {str(e)}")
         return None
 
-def parse_hosts_format(content):
+def parse_domain_list_format(content):
+    """
+    解析纯域名列表格式的内容
+    纯域名列表格式: 每行一个域名
+    例如: example.com
+         *.ads.example.com
+    """
+    rows = []
+    lines = content.strip().splitlines()
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行和注释行
+        if not line or line.startswith('#'):
+            continue
+        
+        # 分割行内容（处理可能的行内注释）
+        parts = line.split()
+        
+        if len(parts) < 1:
+            continue
+        
+        domain = parts[0].split('#')[0].strip()
+        
+        if not domain:
+            continue
+        
+        # 处理通配符域名
+        if domain.startswith('*.'):
+            # 通配符域名转换为domain_suffix
+            domain = domain[2:]  # 移除 *.
+            rows.append({
+                'pattern': 'DOMAIN-SUFFIX',
+                'address': domain,
+                'other': None
+            })
+        elif '*' in domain:
+            # 包含通配符但不是标准的*.格式，作为关键字处理
+            domain = domain.replace('*', '')
+            rows.append({
+                'pattern': 'DOMAIN-KEYWORD',
+                'address': domain,
+                'other': None
+            })
+        else:
+            # 普通域名
+            rows.append({
+                'pattern': 'DOMAIN',
+                'address': domain,
+                'other': None
+            })
+    
+    if rows:
+        return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
+    else:
+        return pd.DataFrame(columns=['pattern', 'address', 'other'])
     """
     解析hosts格式的内容
     hosts格式: IP地址 域名 [域名...]
@@ -74,6 +130,41 @@ def parse_hosts_format(content):
         return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
     else:
         return pd.DataFrame(columns=['pattern', 'address', 'other'])
+
+def is_domain_list_format(content):
+    """
+    判断内容是否为纯域名列表格式
+    纯域名列表格式的特征：
+    1. 每行只有一个域名（可能带有通配符）
+    2. 不包含逗号、等号等特殊格式
+    """
+    lines = content.strip().splitlines()
+    
+    # 至少检查前10行非注释行
+    valid_domain_lines = 0
+    checked_lines = 0
+    
+    for line in lines:
+        line = line.strip()
+        
+        # 跳过空行和注释
+        if not line or line.startswith('#'):
+            continue
+        
+        checked_lines += 1
+        if checked_lines > 10:
+            break
+        
+        # 检查是否只有一个单词（域名），且不包含特殊格式字符
+        parts = line.split()
+        if len(parts) == 1 and ',' not in line and '=' not in line:
+            # 检查是否看起来像域名或通配符域名
+            domain = parts[0]
+            if '.' in domain or '*' in domain:
+                valid_domain_lines += 1
+    
+    # 如果至少有5行符合纯域名格式，就认为是纯域名列表
+    return valid_domain_lines >= 5
 
 def is_hosts_format(content):
     """
