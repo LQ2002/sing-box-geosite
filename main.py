@@ -304,7 +304,7 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
         df['pattern'] = df['pattern'].replace(MAP_DICT)  # 替换pattern为字典中的值
         os.makedirs(output_directory, exist_ok=True)  # 创建自定义文件夹
 
-        result_rules = {"version": 2, "rules": []}
+        result_rules = {"version": 5, "rules": []}
         domain_entries = []
         domain_suffix_entries = []
         ip_cidr_entries = []
