@@ -2,6 +2,7 @@
   "rules": [
     {
       "domain": [
+        "aedns.weixin.qq.com",
         "dns.jd.com",
         "dns.wechat.com",
         "dns.weibo.cn",
