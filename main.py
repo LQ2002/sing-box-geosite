@@ -6,6 +6,7 @@ import json
 import requests
 import yaml
 import ipaddress
+import subprocess
 from io import StringIO
 
 # 映射字典
@@ -178,6 +179,94 @@ def is_ipv4_or_ipv6(address):
         except ValueError:
             return None
 
+
+
+def clean_rule_value(value):
+    """清理规则值：去掉引号、空白、常见的 Surge 额外参数。"""
+    if value is None:
+        return ""
+    value = str(value).strip().strip('"').strip("'").strip()
+    # 只保留第一个字段，避免 no-resolve / force-remote-dns 等参数进入规则值
+    if ',' in value:
+        value = value.split(',', 1)[0].strip()
+    return value
+
+
+def normalize_ip_cidr(value):
+    """把完整 IP / CIDR 规范化成 sing-box 可用的 CIDR 字符串。"""
+    value = clean_rule_value(value)
+    if not value:
+        return None
+    try:
+        return str(ipaddress.ip_network(value, strict=False))
+    except ValueError:
+        return None
+
+
+def ipv4_keyword_prefix_to_cidr(value):
+    """
+    处理 Surge 专用写法：DOMAIN-KEYWORD,101.226.211.
+    这种值在 Surge 中靠字符串包含匹配直接 IP；sing-box domain_keyword 不适合这样用。
+
+    转换规则：
+      101.        -> 101.0.0.0/8
+      101.226.    -> 101.226.0.0/16
+      101.226.211. -> 101.226.211.0/24
+
+    只转换带尾点的 IPv4 前缀，避免把普通关键词误判成网段。
+    """
+    value = clean_rule_value(value)
+    if not value or not value.endswith('.'):
+        return None
+    if not re.fullmatch(r'(?:\d{1,3}\.){1,3}', value):
+        return None
+
+    parts = [p for p in value.split('.') if p != '']
+    if not 1 <= len(parts) <= 3:
+        return None
+
+    octets = []
+    for part in parts:
+        try:
+            number = int(part)
+        except ValueError:
+            return None
+        if number < 0 or number > 255:
+            return None
+        octets.append(number)
+
+    prefix_len = len(octets) * 8
+    while len(octets) < 4:
+        octets.append(0)
+
+    cidr = '.'.join(map(str, octets)) + f'/{prefix_len}'
+    try:
+        return str(ipaddress.ip_network(cidr, strict=False))
+    except ValueError:
+        return None
+
+
+def convert_domain_keyword_value(value):
+    """
+    domain_keyword 的二次分流：
+    - IPv4 前缀类关键词：101.226.211. -> ip_cidr 101.226.211.0/24
+    - 完整 IP / CIDR：1.1.1.1 或 1.1.1.0/24 -> ip_cidr
+    - 其他内容：仍作为 domain_keyword
+    """
+    value = clean_rule_value(value)
+    if not value:
+        return None, None
+
+    cidr = ipv4_keyword_prefix_to_cidr(value)
+    if cidr:
+        return 'ip_cidr', cidr
+
+    cidr = normalize_ip_cidr(value)
+    if cidr:
+        return 'ip_cidr', cidr
+
+    return 'domain_keyword', value
+
 def parse_and_convert_to_dataframe(link):
     try:
         rules = []
@@ -324,7 +413,12 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
             elif pattern == 'ip_cidr':
                 ip_cidr_entries.extend([address.strip() for address in addresses])
             elif pattern == 'domain_keyword':
-                domain_keyword_entries.extend([address.strip() for address in addresses])
+                for address in addresses:
+                    entry_type, entry_value = convert_domain_keyword_value(address)
+                    if entry_type == 'ip_cidr':
+                        ip_cidr_entries.append(entry_value)
+                    elif entry_type == 'domain_keyword':
+                        domain_keyword_entries.append(entry_value)
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
             elif pattern == 'geoip':
@@ -354,7 +448,11 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
                 elif entry_type == 'ip_cidr':
                     ip_cidr_entries.append(entry_value)
                 elif entry_type == 'domain_keyword':
-                    domain_keyword_entries.append(entry_value)
+                    kw_type, kw_value = convert_domain_keyword_value(entry_value)
+                    if kw_type == 'ip_cidr':
+                        ip_cidr_entries.append(kw_value)
+                    elif kw_type == 'domain_keyword':
+                        domain_keyword_entries.append(kw_value)
         
         # 添加去重后的条目到规则中
         if domain_entries:
@@ -402,29 +500,44 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
             output_file.write(result_rules_str)
 
         srs_path = file_name.replace(".json", ".srs")
-        os.system(f"sing-box rule-set compile --output {srs_path} {file_name}")
+        try:
+            subprocess.run(["sing-box", "rule-set", "compile", "--output", srs_path, file_name], check=True)
+        except FileNotFoundError:
+            print("未找到 sing-box，已生成 json，但跳过 srs 编译")
+        except subprocess.CalledProcessError as e:
+            print(f"sing-box 编译失败: {file_name}, 错误码: {e.returncode}")
         return file_name
     except Exception as e:
         print(f'获取链接出错，已跳过：{link}，原因：{str(e)}')
         return None
 
 def determine_entry_type(entry):
-    """根据条目内容确定其类型"""
-    entry = entry.strip()
-    
-    # 检查是否是IP或CIDR
-    if is_ipv4_or_ipv6(entry):
-        return 'ip_cidr', entry
-    
+    """根据 Custom.config 条目内容确定其类型。"""
+    entry = clean_rule_value(entry)
+
+    if not entry:
+        return 'domain', entry
+
+    # Custom.config 里如果直接写 101.226.211.，也按 Surge IP 前缀处理
+    cidr = ipv4_keyword_prefix_to_cidr(entry)
+    if cidr:
+        return 'ip_cidr', cidr
+
+    # 检查是否是完整 IP 或 CIDR
+    cidr = normalize_ip_cidr(entry)
+    if cidr:
+        return 'ip_cidr', cidr
+
     # 如果以点开头，是域名后缀
     if entry.startswith('.'):
         return 'domain_suffix', entry[1:]
-    
+
     # 如果包含通配符或关键词指示符，是域名关键字
     if '*' in entry or entry.startswith('+'):
-        cleaned_entry = entry.replace('*', '').replace('+', '')
-        return 'domain_keyword', cleaned_entry
-    
+        cleaned_entry = entry.replace('*', '').replace('+', '').strip()
+        kw_type, kw_value = convert_domain_keyword_value(cleaned_entry)
+        return kw_type or 'domain_keyword', kw_value or cleaned_entry
+
     # 默认为域名
     return 'domain', entry
 
