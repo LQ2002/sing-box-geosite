@@ -112,6 +112,106 @@ def is_hosts_format(content):
     # 如果至少有3行符合hosts格式，就认为是hosts文件
     return valid_hosts_lines >= 3
 
+
+def clean_plain_token(token):
+    """清理纯域名/IP列表里的单个 token。"""
+    token = token.strip().strip("'\"")
+    token = token.rstrip(',')
+
+    # 常见 Adblock 写法的轻量兼容
+    if token.startswith('||'):
+        token = token[2:]
+    if token.startswith('|'):
+        token = token[1:]
+    if token.endswith('^'):
+        token = token[:-1]
+
+    # 去掉可能出现的协议头和路径，只保留 host
+    token = re.sub(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', '', token)
+    token = token.split('/')[0]
+    token = token.split(':')[0] if token.count(':') == 0 else token
+
+    if token.startswith('.'):
+        token = token[1:]
+    return token.strip().lower()
+
+
+def looks_like_domain(token):
+    """判断 token 是否像域名。这里故意宽松，兼容规则列表里的真实域名。"""
+    token = clean_plain_token(token)
+    if not token or ',' in token or '(' in token or ')' in token:
+        return False
+    if token in MAP_DICT:
+        return False
+    try:
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except ValueError:
+        pass
+    if '.' not in token:
+        return False
+    if len(token) > 253:
+        return False
+    labels = token.rstrip('.').split('.')
+    if len(labels) < 2:
+        return False
+    label_re = re.compile(r'^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$')
+    return all(label_re.match(label) for label in labels)
+
+
+def is_plain_domain_list(content):
+    """
+    判断是否为纯域名/IP列表。
+    兼容：
+    1. 一行一个域名
+    2. 一整行用空格分隔很多域名，例如 ShadowWhisperer/RAW/Microsoft
+    """
+    tokens = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        # 去掉行内注释，避免把说明文字当 token
+        if '#' in line:
+            line = line.split('#', 1)[0].strip()
+        tokens.extend(line.split())
+        if len(tokens) >= 50:
+            break
+
+    if not tokens:
+        return False
+
+    checked = tokens[:50]
+    valid = sum(1 for token in checked if looks_like_domain(token))
+    # 只要大多数 token 像域名，就按纯域名列表处理
+    return valid >= 3 and valid / len(checked) >= 0.8
+
+
+def parse_plain_domain_list(content):
+    """解析纯域名/IP列表为 DataFrame。"""
+    rows = []
+    seen = set()
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '#' in line:
+            line = line.split('#', 1)[0].strip()
+        for raw_token in line.split():
+            token = clean_plain_token(raw_token)
+            if not token or token in seen:
+                continue
+            if not looks_like_domain(token):
+                continue
+            seen.add(token)
+            if is_ipv4_or_ipv6(token):
+                rows.append({'pattern': 'IP-CIDR', 'address': token, 'other': None})
+            else:
+                # 纯域名列表默认按 DOMAIN 处理，避免把 example.com 误扩大成 DOMAIN-SUFFIX
+                rows.append({'pattern': 'DOMAIN', 'address': token, 'other': None})
+
+    return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
+
 def read_list_from_url(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
@@ -122,6 +222,12 @@ def read_list_from_url(url):
                 if is_hosts_format(response.text):
                     print(f"检测到hosts格式: {url}")
                     df = parse_hosts_format(response.text)
+                    return df, []
+
+                # 处理无后缀/纯文本的域名列表：一行一个或空格分隔都可以
+                if is_plain_domain_list(response.text):
+                    print(f"检测到纯域名/IP列表: {url}")
+                    df = parse_plain_domain_list(response.text)
                     return df, []
                 
                 # 原有的CSV解析逻辑
@@ -393,7 +499,7 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
         df['pattern'] = df['pattern'].replace(MAP_DICT)  # 替换pattern为字典中的值
         os.makedirs(output_directory, exist_ok=True)  # 创建自定义文件夹
 
-        result_rules = {"version": 4, "rules": []}
+        result_rules = {"version": 5, "rules": []}
         domain_entries = []
         domain_suffix_entries = []
         ip_cidr_entries = []
