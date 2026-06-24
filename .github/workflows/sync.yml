@@ -14,11 +14,17 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: "Setup sing-box"
-      env:
-        SING_BOX_DEB_URL: "https://github.com/SagerNet/sing-box/releases/download/v1.11.7/sing-box_1.11.7_linux_amd64.deb"
       run: |
           set -Eeuo pipefail
-          wget -O sing-box.deb $SING_BOX_DEB_URL
+          # 从 GitHub Releases API 获取最新 release 中的 linux_amd64 .deb 下载链接
+          SING_BOX_DEB_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep "browser_download_url" | grep "linux_amd64.deb" | head -n1 | cut -d '"' -f4 || true)
+          if [ -z "$SING_BOX_DEB_URL" ]; then
+            echo "Failed to find sing-box linux_amd64 .deb URL from latest release"
+            exit 1
+          fi
+          echo "Downloading $SING_BOX_DEB_URL"
+          wget -O sing-box.deb "$SING_BOX_DEB_URL"
           sudo dpkg -i sing-box.deb
     - name: Set up Python3
       uses: actions/setup-python@v2
@@ -48,6 +54,6 @@ jobs:
           echo "No changes to commit"
           exit 0
         else
-          git commit -m "Update rules"
+          git commit -m "ci: 使用 sing-box 最新正式版下载链接，避免固定版本号"
           git push
         fi
