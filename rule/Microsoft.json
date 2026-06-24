@@ -549,7 +549,6 @@
         "westus.api.cognitive.microsoft.com",
         "westus.tts.speech.microsoft.com",
         "westus2.api.cognitive.microsoft.com",
-        "wfbdevicemanagement",
         "whiteboard.cloud.dev.microsoft",
         "whiteboard.cloud.microsoft",
         "whiteboard.microsoft.com",
@@ -580,5 +579,5 @@
       ]
     }
   ],
-  "version": 2
+  "version": 5
 }
