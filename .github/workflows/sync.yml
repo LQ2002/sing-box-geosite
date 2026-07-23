@@ -54,6 +54,6 @@ jobs:
           echo "No changes to commit"
           exit 0
         else
-          git commit -m "ci: 使用 sing-box 最新正式版下载链接，避免固定版本号"
+          git commit -m "ci: Update rules"
           git push
         fi
