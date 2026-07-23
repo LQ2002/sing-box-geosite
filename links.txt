@@ -7,3 +7,4 @@ https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master
 https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/refs/heads/master/Lists/Microsoft Microsoft
 https://static-file-global.353355.xyz/rules/cn-additional-list-clash-classical.yaml cn-additional
 https://raw.githubusercontent.com/NobyDa/Script/master/Surge/WeChat.list WeChat
+https://raw.githubusercontent.com/wwqgtxx/clash-rules/refs/heads/release/direct.yaml CN_Direct
