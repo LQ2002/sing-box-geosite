@@ -40,6 +40,11 @@ SINGBOX_BOOL_FIELDS = {
 SINGBOX_OBJECT_FIELDS = {'network_interface_address'}
 SINGBOX_LOGICAL_MAX_DEPTH = 8
 
+# 产出的规则集版本。版本决定客户端的最低要求：
+#   1 -> sing-box 1.8   2 -> 1.10   3 -> 1.11   4 -> 1.13   5 -> 1.14
+# 见 https://sing-box.sagernet.org/configuration/rule-set/source-format/
+RULE_SET_VERSION = 5
+
 def read_yaml_from_url(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -699,7 +704,7 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         df['pattern'] = df['pattern'].replace(MAP_DICT)  # 替换pattern为字典中的值
         os.makedirs(output_directory, exist_ok=True)  # 创建自定义文件夹
 
-        result_rules = {"version": 4, "rules": []}
+        result_rules = {"version": RULE_SET_VERSION, "rules": []}
         domain_entries = []
         domain_suffix_entries = []
         ip_cidr_entries = []

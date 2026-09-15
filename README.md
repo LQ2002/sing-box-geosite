@@ -71,6 +71,23 @@ https://github.com/LQ2002/sing-box-geosite/releases/latest/download/CN_Direct.sr
 
 > 旧的 `raw.githubusercontent.com/.../main/rule/xxx.srs` 链接已失效，请改用上方地址。
 
+### 版本要求
+
+生成的 json 写的是 `"version": 5`（`main.py` 里的 `RULE_SET_VERSION`）。
+
+但编译后的 **`.srs` 不受影响** —— sing-box 会按规则实际用到的字段
+选择最低可行的二进制版本，而不是照搬源文件的 version。
+当前这几个规则集只用了 domain / ip_cidr 这些老字段，
+编译出来的 srs 头部仍是 `53 52 53 02`（sing-box >= 1.10 即可）。
+
+| 订阅方式 | 最低 sing-box 版本 |
+| --- | --- |
+| `.srs`（`format: binary`，推荐） | 1.10 |
+| `.json`（`format: source`） | 1.14 |
+
+只有当规则真用到 v5 专有字段（如 `package_name_regex`）时，
+srs 头部才会变成 `53 52 53 05`，那时才需要 1.14。
+
 ## 仓库机器人权限  
 
 仓库 Settings ----> Actions ----> General ----> Workflow permissions ----> Read and write permissions 勾选上（发布 Release 需要写权限）  
