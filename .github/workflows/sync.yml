@@ -97,6 +97,7 @@ jobs:
           exit 0
         fi
 
+        # 用算术偏移而不是 TZ=Asia/Shanghai：不依赖运行环境装了 tzdata
         stamp=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S')
         work="$RUNNER_TEMP/rulebranch"
         rm -rf "$work"
@@ -113,7 +114,7 @@ jobs:
           echo "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$RULE_BRANCH/<名称>.srs"
           echo '```'
           echo
-          echo "最后更新: $stamp (北京时间 UTC+8)"
+          echo "最后更新: $stamp UTC+8"
           echo
           echo "来源提交: $GITHUB_SHA"
         } > "$work/README.md"
@@ -123,7 +124,7 @@ jobs:
         git config user.email "action@github.com"
         git config user.name "GitHub Action"
         git add -A
-        git commit -q -m "规则集 $stamp (北京时间)"
+        git commit -q -m "规则集 $stamp UTC+8"
         git push -f -q \
           "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
           "HEAD:refs/heads/$RULE_BRANCH"

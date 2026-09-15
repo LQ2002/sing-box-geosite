@@ -1292,8 +1292,18 @@ def sanitize_rule_name(name):
 
 TAG_PLACEHOLDER = '{tag}'
 
-# 标签同时用作输出文件名，必须是安全的文件名片段
-TAG_RE = re.compile(r'^[A-Za-z0-9_.@+-]+$')
+# 标签既要拼进 url，也要当文件名。
+# 不允许空白字符（拼进 url 会坏掉），其余交给 sanitize_rule_name 判断。
+TAG_WHITESPACE_RE = re.compile(r'\s')
+
+
+def is_valid_tag(tag):
+    """标签是否可用：非空、无空白、且不含文件系统禁止的字符。"""
+    if not tag or TAG_WHITESPACE_RE.search(tag):
+        return False
+    if RULE_NAME_UNSAFE_RE.search(tag):
+        return False
+    return tag not in ('.', '..')
 
 # 标签自带后缀时，从规则集名里剥掉。只认这几个规则文件常见后缀，
 # 这样 v2.ray 这种本身带点的标签不会被误伤。
@@ -1349,8 +1359,8 @@ def expand_tags(url, name):
     expanded = []
     seen = set()
     for tag in tags:
-        if not TAG_RE.match(tag):
-            print(f"跳过非法标签 {tag!r}（只允许字母、数字和 _ . @ + -）: {url}")
+        if not is_valid_tag(tag):
+            print(f"跳过非法标签 {tag!r}（不能含空白或 / \\ : * ? \" < > |）: {url}")
             continue
         if tag in seen:
             continue
