@@ -32,23 +32,29 @@ def main():
         return 1
 
     expected = report.get("expected", [])
-    generated = report.get("generated", [])
+    outputs = report.get("outputs", {})
 
     for name in report.get("failed", []):
         print(f"::warning::规则 {name} 生成失败")
 
+    # 一个规则名可能产出多个文件（用到 ASN 时会多一个 <名称>-ip），
+    # 必须它名下所有文件都成对齐全，才算这条规则真正产出。
     actual = 0
-    for name in generated:
-        paths = [os.path.join(rule_dir, f"{name}.json"),
-                 os.path.join(rule_dir, f"{name}.srs")]
-        if all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in paths):
-            actual += 1
+    for name, basenames in sorted(outputs.items()):
+        missing = []
+        for base in basenames:
+            for ext in ("json", "srs"):
+                path = os.path.join(rule_dir, f"{base}.{ext}")
+                if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+                    missing.append(f"{base}.{ext}")
+        if missing:
+            print(f"::warning::{name} 缺少 {', '.join(missing)}，不计入成功")
         else:
-            print(f"::warning::{name} 缺少 json 或 srs，不计入成功")
+            actual += 1
 
     print(f"expected={len(expected)} actual={actual}")
-    if len(expected) != len(generated):
-        missing = sorted(set(expected) - set(generated))
+    if len(expected) != len(outputs):
+        missing = sorted(set(expected) - set(outputs))
         print(f"未产出的规则: {', '.join(missing)}")
 
     try:

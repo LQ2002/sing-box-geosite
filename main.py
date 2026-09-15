@@ -1046,6 +1046,55 @@ def sort_dict(obj):
     else:
         return obj
 
+def is_pure_ip_rule(rule):
+    """判断一条 headless rule 是否只按 IP 匹配。
+
+    拆分 -ip 时只能整条移动：一条 default rule 里的多个字段是 AND 关系，
+    把 ip_cidr 单独抽出来会让剩下的部分匹配得更宽。
+    所以只有字段全是 IP 类的规则才移走，域名和 IP 混在同一条里的留在主文件。
+    logical 规则同理，整条留在主文件。
+    """
+    if rule.get('type') == 'logical':
+        return False
+    fields = set(rule) - {'invert'}
+    return bool(fields) and fields <= SINGBOX_CIDR_ARRAY_FIELDS
+
+
+def write_rule_set(name, rules, version, output_directory):
+    """写出一个规则集的 json 并编译成 srs，返回 json 路径；失败返回 None。"""
+    file_name = os.path.join(output_directory, f"{name}.json")
+
+    with open(file_name, 'w', encoding='utf-8') as output_file:
+        # version 放在最前面，跟官方示例一致。
+        # 直接 sort_dict 整个文档会按字母序把 rules 排到 version 前面，
+        # 所以只对 rules 排序，顶层两个键自己按顺序写。
+        #
+        # 不要再对 json.dumps 的结果做反斜杠替换：
+        # 它会把 domain_regex 里合法的 \\ 转义压成单个 \，产出非法 JSON
+        document = {'version': version, 'rules': sort_dict(rules)}
+        output_file.write(json.dumps(document, ensure_ascii=False, indent=2))
+
+    srs_path = file_name.replace(".json", ".srs")
+    try:
+        subprocess.run(["sing-box", "rule-set", "compile", "--output", srs_path, file_name],
+                       check=True)
+    except FileNotFoundError:
+        print("未找到 sing-box，已生成 json，但跳过 srs 编译")
+    except subprocess.CalledProcessError as e:
+        # 编译失败不能当成功返回：调用方只按返回值计数，
+        # CI 又只统计成对的 json/srs，结果会把"这次没生成出来的 srs"
+        # 当成陈旧文件从分支上删掉，订阅直接 404。
+        print(f"sing-box 编译失败: {file_name}, 错误码: {e.returncode}")
+        for path in (file_name, srs_path):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
+        return None
+    return file_name
+
+
 def parse_list_file(links, rule_name, output_directory, custom_entries=None):
     """把同一个规则名下的所有链接合并成一个规则集文件。
 
@@ -1130,6 +1179,8 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         ip_cidr_entries = []
         domain_keyword_entries = []
         domain_regex_entries = []
+        # 这个规则集是否用到了 ASN，决定要不要拆出 -ip 文件
+        has_asn = False
         process_name_entries = []
         process_path_entries = []
         network_entries = []
@@ -1164,6 +1215,7 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
             elif pattern == 'ip_asn':
+                has_asn = True
                 for address in addresses:
                     ip_cidr_entries.extend(expand_asn(address))
             elif pattern == 'process_name':
@@ -1201,6 +1253,9 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                     domain_suffix_entries.append(entry_value)
                 elif entry_type == 'domain':
                     domain_entries.append(entry_value)
+                elif entry_type == 'ip_asn':
+                    has_asn = True
+                    ip_cidr_entries.extend(expand_asn(entry_value))
                 elif entry_type == 'ip_cidr':
                     ip_cidr_entries.append(entry_value)
                 elif entry_type == 'domain_keyword':
@@ -1210,98 +1265,89 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                     elif kw_type == 'domain_keyword':
                         domain_keyword_entries.append(kw_value)
         
-        # 添加去重后的条目到规则中
+        # 添加去重后的条目到规则中。
+        # ip_cidr / source_ip_cidr 先单独放着：这个规则集若用到了 ASN，
+        # 它们会被拆到 <名称>-ip 里，见下面的 has_asn 分支。
+        domain_rules = []
+        ip_rules = []
+
         if domain_entries:
-            domain_entries = list(set(domain_entries))
-            result_rules["rules"].append({'domain': domain_entries})
-            
+            domain_rules.append({'domain': list(set(domain_entries))})
+
         if domain_suffix_entries:
-            domain_suffix_entries = list(set(domain_suffix_entries))
-            result_rules["rules"].append({'domain_suffix': domain_suffix_entries})
-            
+            domain_rules.append({'domain_suffix': list(set(domain_suffix_entries))})
+
         if ip_cidr_entries:
-            ip_cidr_entries = list(set(ip_cidr_entries))
-            result_rules["rules"].append({'ip_cidr': ip_cidr_entries})
-            
+            ip_rules.append({'ip_cidr': list(set(ip_cidr_entries))})
+
         if domain_keyword_entries:
-            domain_keyword_entries = list(set(domain_keyword_entries))
-            result_rules["rules"].append({'domain_keyword': domain_keyword_entries})
-            
+            domain_rules.append({'domain_keyword': list(set(domain_keyword_entries))})
+
         if domain_regex_entries:
-            domain_regex_entries = list(set(domain_regex_entries))
-            result_rules["rules"].append({'domain_regex': domain_regex_entries})
+            domain_rules.append({'domain_regex': list(set(domain_regex_entries))})
 
         if process_name_entries:
-            result_rules["rules"].append({'process_name': list(set(process_name_entries))})
+            domain_rules.append({'process_name': list(set(process_name_entries))})
 
         if process_path_entries:
-            result_rules["rules"].append({'process_path': list(set(process_path_entries))})
+            domain_rules.append({'process_path': list(set(process_path_entries))})
 
         if network_entries:
-            result_rules["rules"].append({'network': list(set(network_entries))})
-            
-        
+            domain_rules.append({'network': list(set(network_entries))})
+
         if port_entries:
-            port_entries = list(set(port_entries))
-            result_rules["rules"].append({'port': port_entries})
-            
+            domain_rules.append({'port': list(set(port_entries))})
+
         if source_port_entries:
-            source_port_entries = list(set(source_port_entries))
-            result_rules["rules"].append({'source_port': source_port_entries})
-            
+            domain_rules.append({'source_port': list(set(source_port_entries))})
+
         if source_ip_cidr_entries:
-            source_ip_cidr_entries = list(set(source_ip_cidr_entries))
-            result_rules["rules"].append({'source_ip_cidr': source_ip_cidr_entries})
-        
+            ip_rules.append({'source_ip_cidr': list(set(source_ip_cidr_entries))})
+
         # sing-box 源格式的规则原样追加：
         # 规则集里的多条 headless rule 之间是 OR 关系，拼接即合并
         if passthrough_rules:
-            seen_rules = {json.dumps(r, sort_keys=True) for r in result_rules["rules"]}
+            seen_rules = {json.dumps(r, sort_keys=True) for r in domain_rules + ip_rules}
             for rule in passthrough_rules:
                 key = json.dumps(rule, sort_keys=True)
-                if key not in seen_rules:
-                    seen_rules.add(key)
-                    result_rules["rules"].append(rule)
+                if key in seen_rules:
+                    continue
+                seen_rules.add(key)
+                if is_pure_ip_rule(rule):
+                    ip_rules.append(rule)
+                else:
+                    domain_rules.append(rule)
 
-        if not result_rules["rules"]:
+        if not domain_rules and not ip_rules:
             print(f"没有可写入的规则: {rule_name}")
             return None
 
-        # 使用自定义名称或原始文件名
-        file_name = os.path.join(output_directory, f"{rule_name}.json")
-        
-        with open(file_name, 'w', encoding='utf-8') as output_file:
-            # version 放在最前面，跟官方示例一致。
-            # 直接 sort_dict(result_rules) 会按字母序把 rules 排到 version 前面，
-            # 所以只对 rules 排序，顶层两个键自己按顺序写。
-            #
-            # 不要再对 json.dumps 的结果做反斜杠替换：
-            # 它会把 domain_regex 里合法的 \\ 转义压成单个 \，产出非法 JSON
-            document = {
-                'version': result_rules['version'],
-                'rules': sort_dict(result_rules['rules']),
-            }
-            result_rules_str = json.dumps(document, ensure_ascii=False, indent=2)
-            output_file.write(result_rules_str)
+        # 用到 ASN 时才拆分。ASN 动辄展开上千条网段，和域名规则混在一个
+        # 规则集里既臃肿、又没法单独给 DNS 规则用，所以单独出一个 -ip 文件。
+        # 没有 ASN 的规则集保持原样，避免凭空多出一堆文件。
+        if has_asn and ip_rules:
+            documents = [(rule_name, domain_rules), (f"{rule_name}-ip", ip_rules)]
+            print(f"  {rule_name}: 含 ASN，IP 类规则拆分到 {rule_name}-ip")
+        else:
+            documents = [(rule_name, domain_rules + ip_rules)]
 
-        srs_path = file_name.replace(".json", ".srs")
-        try:
-            subprocess.run(["sing-box", "rule-set", "compile", "--output", srs_path, file_name], check=True)
-        except FileNotFoundError:
-            print("未找到 sing-box，已生成 json，但跳过 srs 编译")
-        except subprocess.CalledProcessError as e:
-            # 编译失败不能当成功返回：调用方只按返回值计数，
-            # CI 又只统计 json，结果会把"这次没生成出来的 srs"
-            # 当成陈旧资产从 Release 上删掉，订阅直接 404。
-            print(f"sing-box 编译失败: {file_name}, 错误码: {e.returncode}")
-            for path in (file_name, srs_path):
-                try:
-                    if os.path.exists(path):
-                        os.remove(path)
-                except OSError:
-                    pass
-            return None
-        return file_name
+        written = []
+        for name, rules in documents:
+            if not rules:
+                continue
+            path = write_rule_set(name, rules, result_rules['version'], output_directory)
+            if path is None:
+                # 任何一个文件没写成，整组都算失败，避免只发布一半
+                for done in written:
+                    for suffix in ('.json', '.srs'):
+                        stale = done.replace('.json', suffix)
+                        if os.path.exists(stale):
+                            os.remove(stale)
+                return None
+            written.append(path)
+
+        return written
+
     except Exception as e:
         print(f'生成规则集出错，已跳过：{rule_name}，原因：{str(e)}')
         return None
@@ -1325,6 +1371,15 @@ def coerce_ports(addresses, rule_name, field):
 
 def determine_entry_type(entry):
     """根据 Custom.config 条目内容确定其类型。"""
+    # ASN 要在 clean_rule_value 之前判断：它会按逗号截断，
+    # IP-ASN,399358 会只剩下 IP-ASN
+    raw = str(entry).strip()
+    head, sep, rest = raw.partition(',')
+    if sep and head.strip().upper() == 'IP-ASN':
+        return 'ip_asn', rest.strip()
+    if normalize_asn(raw) and raw.upper().startswith('AS'):
+        return 'ip_asn', raw
+
     entry = clean_rule_value(entry)
 
     if not entry:
@@ -1559,7 +1614,7 @@ def read_custom_config():
         print(f"读取Custom.config文件失败: {str(e)}")
         return {}
 
-def write_build_report(expected, generated, failed):
+def write_build_report(expected, outputs, failed):
     """把本次构建的规则名清单写到 BUILD_REPORT 指定的文件。
 
     CI 需要知道"这次应该产出哪些规则集"才能判断要不要清理陈旧资产。
@@ -1572,7 +1627,14 @@ def write_build_report(expected, generated, failed):
     path = os.environ.get('BUILD_REPORT')
     if not path:
         return
-    report = {'expected': expected, 'generated': generated, 'failed': failed}
+    # outputs 是 {规则名: [文件基名, ...]}：用到 ASN 的规则集会多出一个
+    # <名称>-ip，CI 得知道该检查哪些文件才算这条规则真正产出。
+    report = {
+        'expected': expected,
+        'generated': sorted(outputs),
+        'outputs': outputs,
+        'failed': failed,
+    }
     try:
         with open(path, 'w', encoding='utf-8') as fp:
             json.dump(report, fp, ensure_ascii=False, indent=2)
@@ -1628,29 +1690,30 @@ def main():
         print(f"规则 {name} 由 {count} 个源合并生成")
 
     failed = []
-    succeeded = []
+    outputs = {}
     for rule_name, group_links in grouped.items():
-        result_file_name = parse_list_file(
+        paths = parse_list_file(
             group_links,
             rule_name,
             output_directory=output_dir,
             custom_entries=custom_entries
         )
 
-        if result_file_name:
-            result_file_names.append(result_file_name)
-            succeeded.append(rule_name)
-            print(f"成功处理: {rule_name} ({len(group_links)} 个源) -> {result_file_name}")
+        if paths:
+            names = [os.path.splitext(os.path.basename(p))[0] for p in paths]
+            outputs[rule_name] = names
+            result_file_names.extend(paths)
+            print(f"成功处理: {rule_name} ({len(group_links)} 个源) -> {', '.join(names)}")
         else:
             failed.append(rule_name)
             print(f"处理失败: {rule_name}")
 
-    # 打印生成的文件名总数
-    print(f"成功生成 {len(result_file_names)}/{len(grouped)} 个文件")
+    print(f"成功生成 {len(outputs)}/{len(grouped)} 个规则集，共 {len(result_file_names)} 个文件")
     if failed:
         print(f"失败的规则: {', '.join(failed)}")
 
-    write_build_report(sorted(grouped), sorted(succeeded), sorted(failed))
+    write_build_report(sorted(grouped), {k: sorted(v) for k, v in sorted(outputs.items())},
+                       sorted(failed))
 
 if __name__ == "__main__":
     main()

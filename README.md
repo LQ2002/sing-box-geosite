@@ -64,10 +64,13 @@ https://example.com/already-singbox.json    MyRule
 
 ### Custom.config
 
-往某个规则集里追加自己的域名或 IP，格式是 `域名或IP 规则集名称`：
+往某个规则集里追加自己的域名、IP 或 ASN，格式是 `值 规则集名称`：
 
 ```
-dns.wechat.com BlockHttpDNS
+dns.wechat.com  BlockHttpDNS
+1.1.1.0/24      MyRule
+AS399358        MyRule
+IP-ASN,399358   MyRule
 ```
 
 ---
@@ -118,10 +121,29 @@ AND,((IP-ASN,399358),(DOMAIN-SUFFIX,anthropic.com)),PROXY
 几点注意：
 
 - **前缀是会变的**，展开的是构建当天的快照。这个仓库每天重建一次，所以会跟着更新
-- 大型 ASN 的前缀不少（Cloudflare AS13335 约 5400 条，China Telecom AS4134 约 1400 条），会显著增大规则集
+- 大型 ASN 的前缀不少（Cloudflare AS13335 约 5400 条，China Telecom AS4134 约 1400 条）
 - 同一个 ASN 在一次构建里只查一次
 - **查不到就让整个规则集失败**。ASN 往往代表一整家服务商的网段，
   静默少掉它会让规则悄悄失效，不如让 CI 跳过这次发布、保留上一版完整快照
+
+#### 用到 ASN 的规则集会拆成两个文件
+
+ASN 动辄展开上千条网段，和域名规则混在一个规则集里既臃肿、又没法单独给
+DNS 规则用。所以**只要规则集里用到了 ASN**，它的 IP 类规则（`ip_cidr`、
+`source_ip_cidr`，含手写的 `IP-CIDR` / `IP-CIDR6`）会全部拆到 `<名称>-ip`：
+
+```
+Ai-Global!cn.srs      domain / domain_suffix / domain_keyword / process_name ...
+Ai-Global!cn-ip.srs   ip_cidr（ASN 展开的 + 源里手写的）
+```
+
+没用到 ASN 的规则集保持原样，不会凭空多出文件。
+
+订阅时两个都要加：域名集给 DNS 规则或 route 的域名匹配用，IP 集给 route
+的 IP 匹配用。
+
+有一类规则不会被拆走：同一条 headless rule 里既有域名字段又有 IP 字段时
+（字段之间是 AND 关系），拆开会让剩下的部分匹配得更宽，所以整条留在主文件。
 
 ### 复合规则
 
