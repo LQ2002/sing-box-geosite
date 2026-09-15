@@ -116,13 +116,21 @@ jobs:
           echo "跳过陈旧资产清理"
         fi
 
-        # 4. 刷新发布说明里的时间戳
+        # 4. 把 latest 这个 tag 移到当前提交。
+        #    release 页面上"Source code"和 tag 旁边显示的 commit 取自 tag 指向，
+        #    创建之后就不会自己跟着走，不移的话会一直停在创建时那个提交。
+        git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+        git push -f origin "refs/tags/$RELEASE_TAG"
+
+        # 5. 刷新发布说明里的时间戳
         #    注意：下面每一行都必须保持缩进，
         #    顶到第 0 列会提前终止 run: | 的块标量
         {
           echo "自动生成的 sing-box 规则集，每次构建覆盖。"
           echo
-          echo "最后更新: $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+          # 用 UTC+8 算术偏移而不是 TZ=Asia/Shanghai：不依赖运行环境装了 tzdata，
+          # 北京时间没有夏令时，偏移恒定
+          echo "最后更新: $(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S') (北京时间 UTC+8)"
           echo "来源提交: $GITHUB_SHA"
         } > "$RUNNER_TEMP/notes.md"
         gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest

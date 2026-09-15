@@ -777,6 +777,19 @@ def read_list_from_url(url):
             return None, []
 
         try:
+            # 抓回来是网页就直接判失败。硬按规则文本解析的话，
+            # HTML 标签会被切成几十条垃圾"规则类型"刷屏，
+            # 真正的原因（链接给错了）反而看不出来。
+            head = response.text.lstrip()[:512].lower()
+            if head.startswith('<!doctype html') or head.startswith('<html'):
+                print(f"内容是 HTML 网页而不是规则文件: {url}")
+                if '/blob/' in url:
+                    raw = url.replace('://github.com/', '://raw.githubusercontent.com/', 1)
+                    raw = raw.replace('/blob/', '/', 1)
+                    print(f"  提示: blob 链接返回的是网页，请改用 raw 地址")
+                    print(f"        {raw}")
+                return None, []
+
             # 最优先：已经是 sing-box source format 就原样直通，不走文本解析。
             # 一旦内容看起来是 JSON，就必须按 JSON 处理到底：解析失败或
             # 结构不对都直接判这个源失败，绝不能回退到文本解析——
