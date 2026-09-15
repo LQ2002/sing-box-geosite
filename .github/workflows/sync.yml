@@ -55,14 +55,24 @@ jobs:
     - name: Sanity check generated files
       run: |
         set -Eeuo pipefail
-        # 生成失败时宁可保留上一版 release，也不要把 release 清空
-        count=$(find ./rule -maxdepth 1 -type f \( -name '*.json' -o -name '*.srs' \) | wc -l)
-        echo "Generated $count files"
-        if [ "$count" -lt 2 ]; then
-          echo "::error::生成的规则文件过少，疑似脚本失败，中止发布"
+        # links.txt 里去重后的规则名数量 = 本次应该生成的 json 个数
+        expected=$(awk '$1 !~ /^#/ && NF >= 2 { print $2 }' links.txt | sort -u | wc -l)
+        actual=$(find ./rule -maxdepth 1 -type f -name '*.json' | wc -l)
+        echo "expected=$expected actual=$actual"
+        ls -la ./rule/
+
+        if [ "$actual" -eq 0 ]; then
+          echo "::error::没有生成任何规则文件，中止发布"
           exit 1
         fi
-        ls -la ./rule/
+
+        # 有上游挂掉时只上传、不做陈旧资产清理，避免把订阅中的 srs 删掉
+        if [ "$actual" -lt "$expected" ]; then
+          echo "::warning::只生成了 $actual/$expected 个规则，疑似上游源不可用；本次跳过陈旧资产清理"
+          echo "PRUNE_STALE=false" >> "$GITHUB_ENV"
+        else
+          echo "PRUNE_STALE=true" >> "$GITHUB_ENV"
+        fi
 
     - name: Publish to rolling release
       env:
@@ -83,14 +93,19 @@ jobs:
         gh release upload "$RELEASE_TAG" ./rule/* --clobber
 
         # 3. 再删除本次没有生成的陈旧资产（links.txt 里已移除的规则）
-        find ./rule -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/current.txt
-        gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | sort > /tmp/remote.txt
-        comm -13 /tmp/current.txt /tmp/remote.txt > /tmp/stale.txt
-        while read -r asset; do
-          [ -z "$asset" ] && continue
-          echo "Deleting stale asset: $asset"
-          gh release delete-asset "$RELEASE_TAG" "$asset" --yes
-        done < /tmp/stale.txt
+        #    仅在本次生成完整时执行，否则上游临时故障会误删订阅中的资产
+        if [ "${PRUNE_STALE:-false}" = "true" ]; then
+          find ./rule -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/current.txt"
+          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | sort > "$RUNNER_TEMP/remote.txt"
+          comm -13 "$RUNNER_TEMP/current.txt" "$RUNNER_TEMP/remote.txt" > "$RUNNER_TEMP/stale.txt"
+          while read -r asset; do
+            [ -z "$asset" ] && continue
+            echo "Deleting stale asset: $asset"
+            gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+          done < "$RUNNER_TEMP/stale.txt"
+        else
+          echo "跳过陈旧资产清理"
+        fi
 
         # 4. 刷新发布说明里的时间戳
         #    注意：下面每一行都必须保持缩进，
