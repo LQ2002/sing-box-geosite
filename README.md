@@ -73,20 +73,10 @@ https://example.com/extra-wechat.list  WeChat     # 会合并进 WeChat
 
 ```
 Ai-Global!cn   ->  Ai-Global!cn      原样保留
+中文规则        ->  中文规则           也能用
 a/b            ->  a.b               路径分隔符不行
-a:b            ->  a.b
+a:b  a*b  a|b  ->  a.b
 ```
-
-不过 **Release 资产那一路会被 GitHub 改名**。实测（2026-09）它只保留
-`字母 数字 . _ - + @`，其余换成 `.`，非 ASCII 直接消失：
-
-| 文件名 | rule 分支（raw） | Release 资产 |
-| --- | --- | --- |
-| `Ai-Global!cn.srs` | `Ai-Global!cn.srs` | `Ai-Global.cn.srs` |
-| `Ai Global.srs` | `Ai Global.srs` | `Ai.Global.srs` |
-| `中文.srs` | `中文.srs` | `.srs` |
-
-所以想用特殊字符的名字，订阅 rule 分支的 raw 链接。
 
 ## 支持的源格式
 
@@ -141,9 +131,7 @@ dns.wechat.com BlockHttpDNS
 
 ## 订阅链接
 
-规则集不进 main 分支。CI 会把产物同时发到两个地方，**内容完全一样**，挑一个用即可。
-
-### rule 分支（推荐，文件名不受限）
+规则集不进 main 分支，CI 把产物发布到 `rule` 分支：
 
 ```
 https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/<名称>.srs
@@ -159,15 +147,7 @@ https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/CN_Direct.srs
 
 `rule` 是一个孤儿分支，每次构建强制覆盖，**永远只有一个提交**，
 所以仓库不会因为累积历史而膨胀。不要往这个分支提交东西，下次构建就没了。
-
-### GitHub Releases
-
-```
-https://github.com/LQ2002/sing-box-geosite/releases/latest/download/<名称>.srs
-```
-
-文件名会被 GitHub 规整（见上一节），但空间占用是确定性的零增长，
-不依赖 GitHub 回收不可达对象。
+生成不完整时（某个上游源挂了）CI 会跳过这次发布，保留上一版完整快照。
 
 ### 在 sing-box 配置里
 
@@ -183,7 +163,8 @@ https://github.com/LQ2002/sing-box-geosite/releases/latest/download/<名称>.srs
 
 `tag` 是你在路由规则里引用的名字，和文件名无关，想叫什么叫什么。
 
-> 旧的 `raw.githubusercontent.com/.../main/rule/xxx.srs` 链接已失效。
+> 早先用过的 `.../main/rule/xxx.srs` 和 GitHub Releases 的
+> `releases/latest/download/xxx.srs` 链接都已废弃。
 
 ### 版本要求
 
