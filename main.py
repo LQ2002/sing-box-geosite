@@ -17,6 +17,9 @@ MAP_DICT = {'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix', 'h
             'DEST-PORT': 'port',
             'PROCESS-NAME': 'process_name', 'PROCESS-PATH': 'process_path',
             'NETWORK': 'network',
+            # sing-box 的 headless rule 没有 ASN 字段，
+            # 这里先占个位，实际会被展开成 ip_cidr，见 expand_asn
+            'IP-ASN': 'ip_asn',
             'SRC-PORT': 'source_port', "URL-REGEX": "domain_regex", "DOMAIN-REGEX": "domain_regex"}
 
 # ---------------------------------------------------------------------------
@@ -376,6 +379,11 @@ def _parse_surge_logical_component(component):
     if field is None:
         return None, False, False
 
+    # ASN 没有对应字段，展开成 ip_cidr
+    if field == 'ip_asn':
+        prefixes = expand_asn(rest)
+        return {'ip_cidr': prefixes}, False, False
+
     # 正则的值里可以合法地出现逗号，不能按逗号截断
     if head in REGEX_PATTERNS:
         value = strip_trailing_policy(rest)
@@ -411,6 +419,71 @@ def extract_surge_logical_rules(content, stats=None):
     if rules:
         print(f"  解析出 {len(rules)} 条 AND/OR/NOT 复合规则")
     return rules
+
+
+# RIPEstat 的 announced-prefixes 接口，免费且不需要 key
+RIPESTAT_URL = 'https://stat.ripe.net/data/announced-prefixes/data.json'
+
+# 同一个 ASN 可能出现在多个规则集里，一次构建内只查一遍
+_ASN_CACHE = {}
+
+
+class AsnLookupError(Exception):
+    """ASN 查不到时抛出，让整个规则集判失败而不是悄悄少一批网段。"""
+
+
+def normalize_asn(value):
+    """把 399358 / AS399358 / as399358 统一成数字字符串。"""
+    value = clean_rule_value(value).upper()
+    if value.startswith('AS'):
+        value = value[2:]
+    return value if value.isdigit() else None
+
+
+def expand_asn(asn):
+    """把 ASN 展开成它当前宣告的前缀列表。
+
+    sing-box 的 headless rule 没有 ASN 维度，只能在构建时查 BGP 宣告表
+    换成 ip_cidr。前缀是会变的，好在这个仓库每天重建一次。
+
+    查不到就抛 AsnLookupError：ASN 往往代表一整家服务商的网段，
+    静默少掉它会让规则悄悄失效，不如让这个规则集整体失败，
+    CI 会跳过发布并保留上一版完整快照。
+    """
+    number = normalize_asn(asn)
+    if not number:
+        raise AsnLookupError(f"无法识别的 ASN: {asn!r}")
+
+    if number in _ASN_CACHE:
+        return _ASN_CACHE[number]
+
+    try:
+        response = requests.get(
+            RIPESTAT_URL,
+            params={'resource': f'AS{number}'},
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=60,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        raise AsnLookupError(f"AS{number} 查询失败: {e}")
+
+    if data.get('status') != 'ok':
+        raise AsnLookupError(f"AS{number} 查询返回 {data.get('status')!r}")
+
+    prefixes = []
+    for item in data.get('data', {}).get('prefixes', []):
+        normalized = normalize_ip_cidr(item.get('prefix'))
+        if normalized:
+            prefixes.append(normalized)
+
+    if not prefixes:
+        raise AsnLookupError(f"AS{number} 没有查到任何宣告前缀")
+
+    print(f"  AS{number} 展开出 {len(prefixes)} 个网段")
+    _ASN_CACHE[number] = prefixes
+    return prefixes
 
 
 def is_singbox_rule_set(data):
@@ -771,7 +844,8 @@ def read_list_from_url(url):
     """
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        response = requests.get(url, headers=headers)
+        # 必须给超时：上游挂起时没有超时会把整个 job 拖到 GitHub 的 6 小时上限
+        response = requests.get(url, headers=headers, timeout=120)
         if response.status_code != 200:
             print(f"请求URL失败: {url}, 状态码: {response.status_code}")
             return None, []
@@ -1089,6 +1163,9 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                         domain_keyword_entries.append(entry_value)
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
+            elif pattern == 'ip_asn':
+                for address in addresses:
+                    ip_cidr_entries.extend(expand_asn(address))
             elif pattern == 'process_name':
                 process_name_entries.extend([address.strip() for address in addresses])
             elif pattern == 'process_path':

@@ -84,6 +84,7 @@ dns.wechat.com BlockHttpDNS
 | 纯域名 / IP 列表 | 一行一个，或空格分隔 |
 | sing-box 源格式 | 已经是 `{"version": N, "rules": [...]}` 的 json |
 | AND / OR / NOT 复合规则 | 转成 sing-box 的 `type: logical` |
+| `IP-ASN` | 构建时展开成 `ip_cidr`，见下 |
 
 > 用 GitHub 的链接时要用 `raw.githubusercontent.com` 的地址。
 > `github.com/.../blob/...` 返回的是网页，脚本会识别出来并提示正确地址。
@@ -97,6 +98,30 @@ dns.wechat.com BlockHttpDNS
 字段表依据 [headless rule 官方文档](https://sing-box.sagernet.org/configuration/rule-set/headless-rule/)。
 表外的未知字段会被丢弃并在日志里计数 —— sing-box 对未知字段是直接报错的
 （`json: unknown field "xxx"`），不过滤会让整个规则集编译失败。
+
+### IP-ASN
+
+sing-box 的 headless rule 没有 ASN 维度，所以 `IP-ASN` 在构建时查
+[RIPEstat](https://stat.ripe.net/) 的 BGP 宣告表，展开成 `ip_cidr`：
+
+```
+IP-ASN,399358,PROXY
+  -> {"ip_cidr": ["160.79.104.0/23", "2607:6bc0::/48", "2607:6bc0:11::/48"]}
+```
+
+`399358`、`AS399358`、`as399358` 三种写法都认。复合规则里也能用：
+
+```
+AND,((IP-ASN,399358),(DOMAIN-SUFFIX,anthropic.com)),PROXY
+```
+
+几点注意：
+
+- **前缀是会变的**，展开的是构建当天的快照。这个仓库每天重建一次，所以会跟着更新
+- 大型 ASN 的前缀不少（Cloudflare AS13335 约 5400 条，China Telecom AS4134 约 1400 条），会显著增大规则集
+- 同一个 ASN 在一次构建里只查一次
+- **查不到就让整个规则集失败**。ASN 往往代表一整家服务商的网段，
+  静默少掉它会让规则悄悄失效，不如让 CI 跳过这次发布、保留上一版完整快照
 
 ### 复合规则
 
