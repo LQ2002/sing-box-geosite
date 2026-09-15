@@ -105,10 +105,10 @@ jobs:
         #    仅在本次生成完整时执行，否则上游临时故障会误删订阅中的资产
         if [ "${PRUNE_STALE:-false}" = "true" ]; then
           # 本地文件名要按 GitHub 的资产命名规则规整后再比对：上传时
-          # [A-Za-z0-9._-] 之外的字符会被换成 '.'，拿本地原名直接比会对不上，
+          # [A-Za-z0-9._+@-] 之外的字符会被换成 '.'，拿本地原名直接比会对不上，
           # 于是把刚传上去的资产当成陈旧资产删掉。
           find ./rule -maxdepth 1 -type f -printf '%f\n' \
-            | sed 's/[^A-Za-z0-9._-][^A-Za-z0-9._-]*/./g' \
+            | sed 's/[^A-Za-z0-9._+@-][^A-Za-z0-9._+@-]*/./g' \
             | sort > "$RUNNER_TEMP/current.txt"
           gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
             | sort > "$RUNNER_TEMP/remote.txt"

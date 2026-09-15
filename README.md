@@ -66,6 +66,36 @@ https://example.com/rule/{tag}.json    Alipay,WeChat
 https://example.com/extra-wechat.list  WeChat     # 会合并进 WeChat
 ```
 
+## 规则名的可用字符
+
+规则名会直接当 Release 资产名。GitHub 在上传时会自己改名，
+实测（2026-09）保留的字符只有：
+
+```
+字母  数字  .  _  -  +  @
+```
+
+其余一律被换成 `.`，非 ASCII 直接消失：
+
+| 写法 | GitHub 存成 |
+| --- | --- |
+| `Ai-Global!cn.json` | `Ai-Global.cn.json` |
+| `Ai-Global@cn.json` | `Ai-Global@cn.json` |
+| `Ai-Global+cn.json` | `Ai-Global+cn.json` |
+| `Ai Global.json` | `Ai.Global.json` |
+| `rule(x).json` | `rule.x.json` |
+| `中文.json` | `.json` |
+
+所以脚本会先把规则名规整成同一套字符集，并在日志里提示：
+
+```
+规则名 'Ai-Global!cn' 含 GitHub 资产名不支持的字符，已规整为 'Ai-Global.cn'
+```
+
+不做这一步的后果：本地生成 `Ai-Global!cn.json`，GitHub 存成
+`Ai-Global.cn.json`，随后陈旧资产清理拿本地名去比对发现对不上，
+就把刚上传的资产删掉——构建还报成功，订阅却是 404。
+
 ## 支持的源格式
 
 links.txt 里的链接会自动识别格式，无需额外标注：

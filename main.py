@@ -1268,8 +1268,10 @@ def determine_entry_type(entry):
     # 默认为域名
     return 'domain', entry
 
-# GitHub 上传 Release 资产时，会把 [A-Za-z0-9._-] 之外的字符替换成 '.'
-RULE_NAME_UNSAFE_RE = re.compile(r'[^A-Za-z0-9._-]+')
+# GitHub 上传 Release 资产时会改名，实测（2026-09）保留的字符是
+#   字母 数字 . _ - + @
+# 其余一律换成 '.'：! ~ 空格 括号都会被替换，非 ASCII 直接消失。
+RULE_NAME_UNSAFE_RE = re.compile(r'[^A-Za-z0-9._+@-]+')
 
 
 def sanitize_rule_name(name):
