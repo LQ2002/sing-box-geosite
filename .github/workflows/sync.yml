@@ -7,7 +7,7 @@ on:
   schedule:
     - cron: '0 4 * * *'
 
-# 只需要写 Releases，不再往仓库推提交
+# 只需要写 Releases 和 tag，不再往仓库推提交
 permissions:
   contents: write
 
@@ -23,17 +23,17 @@ jobs:
 
     - name: "Setup sing-box"
       run: |
-          set -Eeuo pipefail
-          # 从 GitHub Releases API 获取最新 release 中的 linux_amd64 .deb 下载链接
-          SING_BOX_DEB_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-            | grep "browser_download_url" | grep "linux_amd64.deb" | head -n1 | cut -d '"' -f4 || true)
-          if [ -z "$SING_BOX_DEB_URL" ]; then
-            echo "Failed to find sing-box linux_amd64 .deb URL from latest release"
-            exit 1
-          fi
-          echo "Downloading $SING_BOX_DEB_URL"
-          wget -O sing-box.deb "$SING_BOX_DEB_URL"
-          sudo dpkg -i sing-box.deb
+        set -Eeuo pipefail
+        # 从 GitHub Releases API 获取最新 release 中的 linux_amd64 .deb 下载链接
+        SING_BOX_DEB_URL=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+          | grep "browser_download_url" | grep "linux_amd64.deb" | head -n1 | cut -d '"' -f4 || true)
+        if [ -z "$SING_BOX_DEB_URL" ]; then
+          echo "::error::没有从 sing-box 最新 release 里找到 linux_amd64 的 .deb"
+          exit 1
+        fi
+        echo "Downloading $SING_BOX_DEB_URL"
+        wget -O sing-box.deb "$SING_BOX_DEB_URL"
+        sudo dpkg -i sing-box.deb
 
     - name: Set up Python3
       uses: actions/setup-python@v6
@@ -65,7 +65,7 @@ jobs:
           exit 1
         fi
 
-        python3 .github/scripts/check_build.py           "$report" ./rule "$RUNNER_TEMP/counts.txt"
+        python3 .github/scripts/check_build.py "$report" ./rule "$RUNNER_TEMP/counts.txt"
 
         read -r expected actual < "$RUNNER_TEMP/counts.txt"
         ls -la ./rule/
@@ -89,7 +89,7 @@ jobs:
       run: |
         set -Eeuo pipefail
 
-        # 1. release 不存在则创建（tag 指向当前 commit）
+        # 1. release 不存在则创建
         if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
           gh release create "$RELEASE_TAG" \
             --target "$GITHUB_SHA" \
@@ -104,8 +104,14 @@ jobs:
         # 3. 再删除本次没有生成的陈旧资产（links.txt 里已移除的规则）
         #    仅在本次生成完整时执行，否则上游临时故障会误删订阅中的资产
         if [ "${PRUNE_STALE:-false}" = "true" ]; then
-          find ./rule -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/current.txt"
-          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | sort > "$RUNNER_TEMP/remote.txt"
+          # 本地文件名要按 GitHub 的资产命名规则规整后再比对：上传时
+          # [A-Za-z0-9._-] 之外的字符会被换成 '.'，拿本地原名直接比会对不上，
+          # 于是把刚传上去的资产当成陈旧资产删掉。
+          find ./rule -maxdepth 1 -type f -printf '%f\n' \
+            | sed 's/[^A-Za-z0-9._-][^A-Za-z0-9._-]*/./g' \
+            | sort > "$RUNNER_TEMP/current.txt"
+          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
+            | sort > "$RUNNER_TEMP/remote.txt"
           comm -13 "$RUNNER_TEMP/current.txt" "$RUNNER_TEMP/remote.txt" > "$RUNNER_TEMP/stale.txt"
           while read -r asset; do
             [ -z "$asset" ] && continue
@@ -117,8 +123,8 @@ jobs:
         fi
 
         # 4. 把 latest 这个 tag 移到当前提交。
-        #    release 页面上"Source code"和 tag 旁边显示的 commit 取自 tag 指向，
-        #    创建之后就不会自己跟着走，不移的话会一直停在创建时那个提交。
+        #    release 页面上 tag 旁边显示的 commit 取自 tag 指向，
+        #    创建之后不会自己跟着走，不移的话会一直停在创建时那个提交。
         git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
         git push -f origin "refs/tags/$RELEASE_TAG"
 

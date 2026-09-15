@@ -1268,6 +1268,21 @@ def determine_entry_type(entry):
     # 默认为域名
     return 'domain', entry
 
+# GitHub 上传 Release 资产时，会把 [A-Za-z0-9._-] 之外的字符替换成 '.'
+RULE_NAME_UNSAFE_RE = re.compile(r'[^A-Za-z0-9._-]+')
+
+
+def sanitize_rule_name(name):
+    """把规则名规整成既能当文件名、也能原样当 Release 资产名的形式。
+
+    不做这一步的话：本地生成 "Ai-Global!cn.json"，GitHub 存成
+    "Ai-Global.cn.json"，随后陈旧资产清理拿本地名去比对发现对不上，
+    就把刚上传的资产删掉了——构建还报成功，订阅却是 404。
+    """
+    cleaned = RULE_NAME_UNSAFE_RE.sub('.', name).strip('.')
+    return cleaned or 'rule'
+
+
 TAG_PLACEHOLDER = '{tag}'
 
 # 标签同时用作输出文件名，必须是安全的文件名片段
@@ -1487,9 +1502,22 @@ def main():
     # 按规则名分组：links.txt 里同名的多个链接要合并成一个规则集，
     # 逐条处理会让先写的文件被后写的整个覆盖。
     grouped = {}
+    origin_names = {}
     for link, name in entries:
         if not name:
             name = os.path.basename(link).split('.')[0]
+
+        safe_name = sanitize_rule_name(name)
+        if safe_name != name:
+            print(f"规则名 {name!r} 含 GitHub 资产名不支持的字符，已规整为 {safe_name!r}")
+
+        # 两个不同的原名规整成同一个名字会被悄悄合并成一个规则集，必须提示
+        previous = origin_names.setdefault(safe_name, name)
+        if previous != name:
+            print(f"::warning::规则名 {name!r} 和 {previous!r} 都规整成了 {safe_name!r}，"
+                  f"它们会被合并成同一个规则集")
+        name = safe_name
+
         # 同一个规则名下重复出现同一个 URL 就没必要抓两次
         if link not in grouped.setdefault(name, []):
             grouped[name].append(link)
