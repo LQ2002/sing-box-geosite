@@ -48,17 +48,6 @@ SINGBOX_LOGICAL_MAX_DEPTH = 8
 # 见 https://sing-box.sagernet.org/configuration/rule-set/source-format/
 RULE_SET_VERSION = 5
 
-def read_yaml_from_url(url):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        yaml_data = yaml.safe_load(response.text)
-        return yaml_data
-    except Exception as e:
-        print(f"读取YAML失败: {url}, 错误: {str(e)}")
-        return None
-
 def parse_hosts_format(content):
     """
     解析hosts格式的内容
@@ -70,11 +59,20 @@ def parse_hosts_format(content):
     
     for line in lines:
         line = line.strip()
-        
+
         # 跳过空行和注释行
         if not line or line.startswith('#'):
             continue
-        
+
+        # 行内注释整段截掉。逐 token 切 '#' 会把注释里的词
+        # （例如 "0.0.0.0 a.com # see docs.example.com"）当成额外域名。
+        for sep in ('#', ';'):
+            if sep in line:
+                line = line.split(sep, 1)[0]
+        line = line.strip()
+        if not line:
+            continue
+
         # 分割行内容
         parts = line.split()
         
@@ -91,8 +89,7 @@ def parse_hosts_format(content):
             domains = parts[1:]
             
             for domain in domains:
-                # 清理域名（移除可能的注释）
-                domain = domain.split('#')[0].strip()
+                domain = domain.strip()
                 if domain:
                     rows.append({
                         'pattern': 'DOMAIN',
@@ -145,6 +142,18 @@ def is_hosts_format(content):
     return valid_hosts_lines >= 3
 
 
+def looks_like_cidr(token):
+    """判断 token 是否是带掩码的网段（含 IPv6）。"""
+    token = token.strip()
+    if '/' not in token:
+        return False
+    try:
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
 def clean_plain_token(token):
     """清理纯域名/IP列表里的单个 token。"""
     token = token.strip().strip("'\"")
@@ -158,11 +167,19 @@ def clean_plain_token(token):
     if token.endswith('^'):
         token = token[:-1]
 
-    # 去掉可能出现的协议头和路径，只保留 host
+    # 去掉可能出现的协议头
     token = re.sub(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', '', token)
-    token = token.split('/')[0]
-    token = token.split(':')[0] if token.count(':') == 0 else token
 
+    # CIDR 要整体保留：'/' 在这里是掩码分隔符而不是 URL 路径分隔符，
+    # 按路径切会把 10.0.0.0/8 退化成单地址 10.0.0.0/32。
+    if not looks_like_cidr(token):
+        token = token.split('/')[0]
+        # 只有不含冒号时才按端口切，否则会截断 IPv6
+        token = token.split(':')[0] if token.count(':') == 0 else token
+
+    # Clash domainset 的后缀写法 +.example.com
+    if token.startswith('+'):
+        token = token[1:]
     if token.startswith('.'):
         token = token[1:]
     return token.strip().lower()
@@ -187,7 +204,9 @@ def looks_like_domain(token):
     labels = token.rstrip('.').split('.')
     if len(labels) < 2:
         return False
-    label_re = re.compile(r'^[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?$')
+    # 首字符允许下划线：_domainkey、_dmarc、_sip 这类都是合法 DNS 标签，
+    # 卡死首字符会把 DKIM/SRV 相关的域名整批判否
+    label_re = re.compile(r'^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$')
     return all(label_re.match(label) for label in labels)
 
 
@@ -215,8 +234,11 @@ def is_plain_domain_list(content):
 
     checked = tokens[:50]
     valid = sum(1 for token in checked if looks_like_domain(token))
-    # 只要大多数 token 像域名，就按纯域名列表处理
-    return valid >= 3 and valid / len(checked) >= 0.8
+    # 只要大多数 token 像域名，就按纯域名列表处理。
+    # 下限取 1 而不是 3：只有一两个域名的列表同样合法，
+    # 卡 3 会让它们掉进 CSV 分支，pattern 变成域名本身后被整体过滤掉。
+    # Clash/Surge 的规则行含逗号，looks_like_domain 会判否，不会误入这里。
+    return valid >= 1 and valid / len(checked) >= 0.8
 
 
 def parse_plain_domain_list(content):
@@ -230,6 +252,11 @@ def parse_plain_domain_list(content):
         if '#' in line:
             line = line.split('#', 1)[0].strip()
         for raw_token in line.split():
+            raw = raw_token.strip().strip("'\"").rstrip(',')
+            # 前导点（.example.com / +.example.com）是后缀写法，
+            # clean_plain_token 会把点去掉，所以要在清理前判断
+            is_suffix = raw.startswith('.') or raw.startswith('+.')
+
             token = clean_plain_token(raw_token)
             if not token or token in seen:
                 continue
@@ -238,8 +265,10 @@ def parse_plain_domain_list(content):
             seen.add(token)
             if is_ipv4_or_ipv6(token):
                 rows.append({'pattern': 'IP-CIDR', 'address': token, 'other': None})
+            elif is_suffix:
+                rows.append({'pattern': 'DOMAIN-SUFFIX', 'address': token, 'other': None})
             else:
-                # 纯域名列表默认按 DOMAIN 处理，避免把 example.com 误扩大成 DOMAIN-SUFFIX
+                # 没有前导点就按 DOMAIN 处理，避免把 example.com 误扩大成后缀
                 rows.append({'pattern': 'DOMAIN', 'address': token, 'other': None})
 
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
@@ -269,7 +298,16 @@ def split_top_level(text):
 
 
 def parse_surge_logical_component(component):
-    """把 Surge/Clash 的一个复合规则分量转成 sing-box headless rule。
+    """把 Surge/Clash 的一个复合规则分量转成 sing-box headless rule。"""
+    rule, _ = _parse_surge_logical_component(component)
+    return rule
+
+
+def _parse_surge_logical_component(component):
+    """返回 (规则或 None, 是否有分量没能完整映射)。
+
+    lossy 必须向上传播：NOT(OR(A, 不支持的条件)) 如果只在内层
+    静默丢掉一个分量，外层取反之后会匹配到原本被排除的流量。
 
     支持嵌套，例如 AND,((OR,((DOMAIN,a.com),(DOMAIN,b.com))),(DEST-PORT,443)),REJECT
     """
@@ -277,7 +315,7 @@ def parse_surge_logical_component(component):
     if component.startswith('(') and component.endswith(')'):
         component = component[1:-1].strip()
     if not component:
-        return None
+        return None, True
 
     head, _, rest = component.partition(',')
     head = head.strip().upper()
@@ -285,30 +323,34 @@ def parse_surge_logical_component(component):
     if head in SURGE_LOGICAL_KEYWORDS:
         parts = split_top_level(rest)
         if not parts:
-            return None
+            return None, True
         # parts[0] 是括号包起来的分量组，后面可能还跟着策略名（REJECT/DIRECT/...）
         group = parts[0].strip()
         if group.startswith('(') and group.endswith(')'):
             group = group[1:-1].strip()
 
         sub_rules = []
-        dropped = 0
+        lossy = False
         for part in split_top_level(group):
-            parsed = parse_surge_logical_component(part)
-            if parsed:
-                sub_rules.append(parsed)
-            else:
-                dropped += 1
+            parsed, part_lossy = _parse_surge_logical_component(part)
+            if parsed is None:
+                lossy = True
+                continue
+            if part_lossy:
+                # 子分量自身就是残缺的，例如内层 OR 丢了一个条件
+                lossy = True
+            sub_rules.append(parsed)
 
         if not sub_rules:
-            return None
+            return None, True
 
         # AND / NOT 少一个条件会让规则变宽（匹配到本不该匹配的流量），
         # 这种降级比丢规则更危险，所以整条丢弃。
-        # OR 少一个条件只是变窄，保留剩下的是安全的。
-        if dropped and head in ('AND', 'NOT'):
-            print(f"  复合规则有 {dropped} 个分量无法映射，整条丢弃: {component[:70]}")
-            return None
+        # OR 少一个条件只是变窄，保留剩下的是安全的——
+        # 但 lossy 要继续往上传，外层若是 AND 或 NOT，收窄会翻转成放宽。
+        if lossy and head in ('AND', 'NOT'):
+            print(f"  复合规则有分量无法完整映射，整条丢弃: {component[:70]}")
+            return None, True
 
         rule = {
             'type': 'logical',
@@ -318,17 +360,17 @@ def parse_surge_logical_component(component):
         # sing-box 没有 NOT，用 invert 表达取反
         if head == 'NOT':
             rule['invert'] = True
-        return rule
+        return rule, lossy
 
     # 叶子分量：精确取键，不能用子串匹配。
     # 子串匹配会让 SRC-IP-CIDR,10.0.0.0/8 同时命中 IP-CIDR，多出一条错误规则。
     field = MAP_DICT.get(head)
     if field is None:
-        return None
+        return None, True
     value = clean_rule_value(rest)
     if not value:
-        return None
-    return {field: [value]}
+        return None, True
+    return {field: [value]}, False
 
 
 def extract_surge_logical_rules(content, stats=None):
@@ -375,33 +417,66 @@ def _as_list(value):
 
 
 def sanitize_singbox_rule(rule, stats, depth=0):
-    """按官方字段表清洗一条 headless rule，返回清洗后的规则或 None。
+    """按官方字段表清洗一条 headless rule，返回清洗后的规则或 None。"""
+    cleaned, _ = _sanitize_singbox_rule(rule, stats, depth)
+    return cleaned
 
-    来源是远端 URL，不能直接信任：未知字段一律丢弃并计数，
-    否则会产出 sing-box 无法编译的规则集。
+
+def _sanitize_singbox_rule(rule, stats, depth=0):
+    """清洗一条 headless rule，返回 (规则或 None, 是否发生了会放宽匹配的丢弃)。
+
+    来源是远端 URL，不能直接信任：字段表之外的键一律丢弃，
+    否则 sing-box 会报 unknown field 让整个规则集编译失败。
+
+    关键在于"丢掉什么会放宽匹配"：
+    - 一条 default rule 内的多个字段是 AND 关系，整个字段消失 => 放宽
+    - logical and 少一个子规则 => 放宽
+    - logical or 少一个子规则 => 收窄，本身安全，但要向上传播：
+      外层若是 and 或带 invert，收窄会翻转成放宽
+    - 字段内少掉个别取值（某条 CIDR 解析不了）=> 收窄，安全
+
+    放宽是危险的（REJECT 规则会误杀本不该拦的流量），所以一旦发生就整条丢弃。
     """
     if rule.get('type') == 'logical':
         if depth >= SINGBOX_LOGICAL_MAX_DEPTH:
             stats['logical(嵌套过深)'] = stats.get('logical(嵌套过深)', 0) + 1
-            return None
-        sub_rules = []
-        for sub in _as_list(rule.get('rules', [])):
-            if not isinstance(sub, dict):
-                continue
-            cleaned = sanitize_singbox_rule(sub, stats, depth + 1)
-            if cleaned:
-                sub_rules.append(cleaned)
-        if not sub_rules:
-            return None
+            return None, True
+
         mode = str(rule.get('mode', 'and')).lower()
         if mode not in ('and', 'or'):
             mode = 'and'
+        inverted = bool(rule.get('invert'))
+
+        sub_rules = []
+        lossy = False
+        for sub in _as_list(rule.get('rules', [])):
+            if not isinstance(sub, dict):
+                lossy = True
+                continue
+            cleaned, sub_lossy = _sanitize_singbox_rule(sub, stats, depth + 1)
+            if cleaned is None:
+                lossy = True
+                continue
+            if sub_lossy:
+                lossy = True
+            sub_rules.append(cleaned)
+
+        if not sub_rules:
+            return None, True
+
+        # and 少条件是放宽；or 带 invert 时收窄会翻转成放宽。两者都失败关闭。
+        if lossy and (mode == 'and' or inverted):
+            stats['logical(子条件缺失,整条丢弃)'] = stats.get('logical(子条件缺失,整条丢弃)', 0) + 1
+            return None, True
+
         out = {'type': 'logical', 'mode': mode, 'rules': sub_rules}
-        if rule.get('invert'):
+        if inverted:
             out['invert'] = True
-        return out
+        return out, lossy
 
     out = {}
+    dropped_field = False
+
     for field, value in rule.items():
         if field == 'type':
             continue
@@ -418,12 +493,16 @@ def sanitize_singbox_rule(rule, stats, depth=0):
         if field in SINGBOX_OBJECT_FIELDS:
             if isinstance(value, dict) and value:
                 out[field] = value
+            else:
+                dropped_field = True
             continue
 
         if field in SINGBOX_INT_ARRAY_FIELDS:
             ports = coerce_ports(_as_list(value), '<sing-box>', field)
             if ports:
                 out[field] = ports
+            else:
+                dropped_field = True
             continue
 
         if field in SINGBOX_CIDR_ARRAY_FIELDS:
@@ -436,24 +515,39 @@ def sanitize_singbox_rule(rule, stats, depth=0):
                     stats[f'{field}(无法解析)'] = stats.get(f'{field}(无法解析)', 0) + 1
             if cidrs:
                 out[field] = cidrs
+            else:
+                dropped_field = True
             continue
 
         if field in SINGBOX_MIXED_ARRAY_FIELDS:
             items = [v for v in _as_list(value) if isinstance(v, (int, str))]
             if items:
                 out[field] = items
+            else:
+                dropped_field = True
             continue
 
         if field in SINGBOX_STRING_ARRAY_FIELDS:
             items = [str(v).strip() for v in _as_list(value) if str(v).strip()]
             if items:
                 out[field] = items
+            else:
+                dropped_field = True
             continue
 
-        # 官方字段表之外的键：丢弃并计数
+        # 官方字段表之外的键
         stats[field] = stats.get(field, 0) + (len(value) if isinstance(value, list) else 1)
+        dropped_field = True
 
-    return out or None
+    # 同一条规则内的字段是 AND 关系，少一个字段就等于放宽，整条丢弃
+    if dropped_field:
+        stats['rule(字段缺失,整条丢弃)'] = stats.get('rule(字段缺失,整条丢弃)', 0) + 1
+        return None, True
+
+    if not out:
+        return None, True
+
+    return out, False
 
 
 def parse_singbox_rule_set(data, url=''):
@@ -481,57 +575,183 @@ def parse_singbox_rule_set(data, url=''):
     return rules
 
 
+# DOMAIN-REGEX / URL-REGEX 的值里可以合法地出现逗号，
+# 例如 ^ad[0-9]{1,3}\.example\.com$ —— 对这些类型不能按逗号截断
+REGEX_PATTERNS = {'URL-REGEX', 'DOMAIN-REGEX'}
+
+# 规则行末尾常见的策略名，解析正则值时用来识别并剥掉尾部策略
+KNOWN_POLICIES = {
+    'DIRECT', 'REJECT', 'REJECT-DROP', 'REJECT-TINYGIF', 'REJECT-DICT',
+    'REJECT-ARRAY', 'REJECT-NO-DROP', 'PROXY', 'no-resolve', 'force-remote-dns',
+    'extended-matching', 'pre-matching',
+}
+
+
+def parse_rule_line(line):
+    """把一行 Clash/Surge 规则拆成 (pattern, address)。
+
+    手写解析而不是 pd.read_csv：read_csv 固定列数，一旦某行字段数超出
+    （复合规则、带策略参数的行），pandas 会把多出来的列当成索引，
+    导致其后所有行整体错位——pattern 列拿到的是地址值，随后被整体过滤掉。
+    另外 read_csv 会把空值和字符串 "NA" 变成 float nan，
+    后续 .strip() 直接抛异常并让整个规则集失败。
+    """
+    line = line.strip()
+    if not line or line.startswith('#') or line.startswith(';'):
+        return None
+
+    head, sep, rest = line.partition(',')
+    pattern = head.strip()
+    if not sep:
+        return None
+
+    if pattern.upper() in REGEX_PATTERNS:
+        # 正则值整体保留，只在末尾确实是已知策略时剥掉
+        value = rest.strip()
+        if ',' in value:
+            body, _, tail = value.rpartition(',')
+            if tail.strip() in KNOWN_POLICIES:
+                value = body.strip()
+        return pattern, value
+
+    return pattern, clean_rule_value(rest)
+
+
+def parse_rule_lines(content):
+    """按行解析 Clash/Surge 规则文本。"""
+    rows = []
+    for line in content.splitlines():
+        parsed = parse_rule_line(line)
+        if not parsed:
+            continue
+        pattern, address = parsed
+        if not pattern or not address:
+            continue
+        if pattern.upper() in SURGE_LOGICAL_KEYWORDS:
+            continue  # 复合规则单独扫，见 extract_surge_logical_rules
+        rows.append({'pattern': pattern, 'address': address, 'other': None})
+    return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
+
+
+def try_parse_clash_payload(content, url=''):
+    """识别并解析 Clash 的 payload: 结构。
+
+    按内容判断而不是看 URL 后缀：.yml、带查询串的 .yaml?raw=1
+    这类地址同样是合法的 Clash 规则集，靠后缀匹配会把它们
+    错当成规则行文本，结果整份规则被过滤光。
+
+    不是这种格式时返回 (None, [])。
+    """
+    # 必须是独立成行的 payload: 键。只按子串判断的话，
+    # 注释里出现过这个词就会触发整份文件的 YAML 解析（几 MB 的列表会很慢）。
+    if not re.search(r'^\s*payload\s*:', content, re.M):
+        return None, []
+    try:
+        data = yaml.safe_load(content)
+    except Exception as e:
+        print(f"payload 解析失败，回退到文本解析: {url}, 错误: {str(e)}")
+        return None, []
+    if not isinstance(data, dict):
+        return None, []
+    items = data.get('payload')
+    if not isinstance(items, list):
+        return None, []
+
+    print(f"检测到 Clash payload 规则集: {url}")
+    rows = []
+    logical_rules = []
+    stats = {}
+
+    for item in items:
+        item = str(item).strip().strip("'\"")
+        if not item:
+            continue
+
+        head = item.split(',', 1)[0].strip().upper()
+        if head in SURGE_LOGICAL_KEYWORDS:
+            parsed = parse_surge_logical_component(item)
+            cleaned = sanitize_singbox_rule(parsed, stats) if parsed else None
+            if cleaned:
+                logical_rules.append(cleaned)
+            continue
+
+        if ',' not in item:
+            # 裸域名 / IP / 后缀写法
+            if is_ipv4_or_ipv6(item):
+                rows.append({'pattern': 'IP-CIDR', 'address': item, 'other': None})
+                continue
+            address = item
+            if address.startswith('+'):
+                address = address[1:]
+            if address.startswith('.'):
+                rows.append({'pattern': 'DOMAIN-SUFFIX', 'address': address[1:], 'other': None})
+            else:
+                rows.append({'pattern': 'DOMAIN', 'address': address, 'other': None})
+            continue
+
+        parsed = parse_rule_line(item)
+        if not parsed:
+            continue
+        pattern, address = parsed
+        if pattern and address:
+            rows.append({'pattern': pattern, 'address': address, 'other': None})
+
+    if logical_rules:
+        print(f"  解析出 {len(logical_rules)} 条 AND/OR/NOT 复合规则")
+
+    return pd.DataFrame(rows, columns=['pattern', 'address', 'other']), logical_rules
+
+
 def read_list_from_url(url):
+    """抓取并解析一个规则源。
+
+    失败时返回 (None, []) —— None 表示"这个源没取到"，
+    和"取到了但内容为空"必须区分开，否则多源合并时
+    一个源挂掉会被当成空集静默跳过，发布出不完整的规则集。
+    """
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            try:
-                # 最优先：已经是 sing-box source format 就原样直通，不走文本解析
-                if response.text.lstrip().startswith('{'):
-                    try:
-                        singbox_data = json.loads(response.text)
-                    except ValueError:
-                        singbox_data = None
-                    if is_singbox_rule_set(singbox_data):
-                        print(f"检测到 sing-box 源格式规则集: {url}")
-                        empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
-                        return empty, parse_singbox_rule_set(singbox_data, url)
-
-                # 其次检查是否是hosts格式
-                if is_hosts_format(response.text):
-                    print(f"检测到hosts格式: {url}")
-                    df = parse_hosts_format(response.text)
-                    return df, []
-
-                # 处理无后缀/纯文本的域名列表：一行一个或空格分隔都可以
-                if is_plain_domain_list(response.text):
-                    print(f"检测到纯域名/IP列表: {url}")
-                    df = parse_plain_domain_list(response.text)
-                    return df, []
-                
-                # 原有的CSV解析逻辑
-                csv_data = StringIO(response.text)
-                df = pd.read_csv(csv_data, header=None, names=['pattern', 'address', 'other', 'other2', 'other3'], on_bad_lines='skip')
-                
-                # 复合规则从原始文本里扫，不能指望 CSV：
-                # 这些行字段数不定，会被 on_bad_lines='skip' 整行丢弃
-                rules = extract_surge_logical_rules(response.text)
-
-                df_filtered = df[~df['pattern'].astype(str).str.upper().isin(SURGE_LOGICAL_KEYWORDS)]
-                df_filtered = df_filtered.reset_index(drop=True)
-                return df_filtered, rules
-            except Exception as e:
-                print(f"解析URL内容失败: {url}, 错误: {str(e)}")
-                # 返回空DataFrame和空规则列表，而不是None
-                return pd.DataFrame(columns=['pattern', 'address', 'other', 'other2', 'other3']), []
-        else:
+        if response.status_code != 200:
             print(f"请求URL失败: {url}, 状态码: {response.status_code}")
-            # 返回空DataFrame和空规则列表，而不是None
-            return pd.DataFrame(columns=['pattern', 'address', 'other', 'other2', 'other3']), []
+            return None, []
+
+        try:
+            # 最优先：已经是 sing-box source format 就原样直通，不走文本解析
+            if response.text.lstrip().startswith('{'):
+                try:
+                    singbox_data = json.loads(response.text)
+                except ValueError:
+                    singbox_data = None
+                if is_singbox_rule_set(singbox_data):
+                    print(f"检测到 sing-box 源格式规则集: {url}")
+                    empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
+                    return empty, parse_singbox_rule_set(singbox_data, url)
+
+            # Clash 的 payload: 结构按内容识别，不看 URL 后缀
+            payload_df, payload_rules = try_parse_clash_payload(response.text, url)
+            if payload_df is not None:
+                return payload_df, payload_rules
+
+            # hosts 格式
+            if is_hosts_format(response.text):
+                print(f"检测到hosts格式: {url}")
+                return parse_hosts_format(response.text), []
+
+            # 无后缀/纯文本的域名列表：一行一个或空格分隔都可以
+            if is_plain_domain_list(response.text):
+                print(f"检测到纯域名/IP列表: {url}")
+                return parse_plain_domain_list(response.text), []
+
+            # Clash / Surge 规则行
+            rules = extract_surge_logical_rules(response.text)
+            return parse_rule_lines(response.text), rules
+        except Exception as e:
+            print(f"解析URL内容失败: {url}, 错误: {str(e)}")
+            return None, []
     except Exception as e:
         print(f"请求URL出错: {url}, 错误: {str(e)}")
-        return pd.DataFrame(columns=['pattern', 'address', 'other', 'other2', 'other3']), []
+        return None, []
 
 def is_ipv4_or_ipv6(address):
     """判断字符串是否为 IPv4/IPv6 地址或网段。
@@ -639,98 +859,21 @@ def convert_domain_keyword_value(value):
     return 'domain_keyword', value
 
 def parse_and_convert_to_dataframe(link):
+    """抓取并解析一个规则源，返回 (df, 复合规则列表)。
+
+    格式一律按内容识别，不看 URL 后缀：靠 .yaml/.txt 后缀路由会让
+    .yml、.yaml?raw=1 这类地址走错分支；而 YAML 解析一旦失败
+    原先会直接返回空集，没有回退到文本解析。
+
+    df 为 None 表示这个源没取到（网络错误、非 200、解析异常），
+    必须和"取到了但内容为空"区分开。
+    """
     try:
-        rules = []
-        # 根据链接扩展名分情况处理
-        if link.endswith('.yaml') or link.endswith('.txt'):
-            try:
-                yaml_data = read_yaml_from_url(link)
-                rows = []
-                if yaml_data is None:
-                    return pd.DataFrame(columns=['pattern', 'address', 'other']), []
-
-                # JSON 是合法 YAML，.txt/.yaml 后缀下也可能是 sing-box 源格式
-                if is_singbox_rule_set(yaml_data):
-                    print(f"检测到 sing-box 源格式规则集: {link}")
-                    empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
-                    return empty, parse_singbox_rule_set(yaml_data, link)
-                
-                if not isinstance(yaml_data, str):
-                    items = yaml_data.get('payload', [])
-                    if not items:
-                        items = []
-                else:
-                    lines = yaml_data.splitlines()
-                    if lines:
-                        line_content = lines[0]
-                        items = line_content.split()
-                    else:
-                        items = []
-                
-                logical_rules = []
-                logical_stats = {}
-
-                for item in items:
-                    address = item.strip("'")
-
-                    # payload 里也可能有 AND/OR/NOT 复合规则
-                    if str(item).split(',', 1)[0].strip().upper() in SURGE_LOGICAL_KEYWORDS:
-                        parsed = parse_surge_logical_component(str(item))
-                        cleaned = sanitize_singbox_rule(parsed, logical_stats) if parsed else None
-                        if cleaned:
-                            logical_rules.append(cleaned)
-                        continue
-
-                    if ',' not in item:
-                        if is_ipv4_or_ipv6(item):
-                            pattern = 'IP-CIDR'
-                        else:
-                            if address.startswith('+') or address.startswith('.'):
-                                pattern = 'DOMAIN-SUFFIX'
-                                address = address[1:]
-                                if address.startswith('.'):
-                                    address = address[1:]
-                            else:
-                                pattern = 'DOMAIN'
-                    else:
-                        parts = item.split(',', 1)
-                        if len(parts) == 2:
-                            pattern, address = parts
-                        else:
-                            pattern = 'DOMAIN'
-                            address = parts[0]
-                    
-                    if ',' in address:
-                        address = address.split(',', 1)[0]
-                    
-                    rows.append({'pattern': pattern.strip(), 'address': address.strip(), 'other': None})
-                
-                if logical_rules:
-                    print(f"  解析出 {len(logical_rules)} 条 AND/OR/NOT 复合规则")
-
-                if rows:
-                    df = pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
-                else:
-                    df = pd.DataFrame(columns=['pattern', 'address', 'other'])
-
-                rules = logical_rules
-            except Exception as e:
-                print(f"解析YAML/TXT失败: {link}, 错误: {str(e)}")
-                df, rules = read_list_from_url(link)
-        else:
-            # 对于没有扩展名或其他扩展名的文件，直接调用read_list_from_url
-            # 该函数会自动检测是否为hosts格式
-            df, rules = read_list_from_url(link)
-        
-        # 确保df不为None
-        if df is None:
-            df = pd.DataFrame(columns=['pattern', 'address', 'other'])
-        
-        return df, rules
+        return read_list_from_url(link)
     except Exception as e:
         print(f"处理链接失败: {link}, 错误: {str(e)}")
-        # 返回空DataFrame和空规则列表
-        return pd.DataFrame(columns=['pattern', 'address', 'other']), []
+        return None, []
+
 
 # 对字典进行排序，含list of dict
 def sort_dict(obj):
@@ -765,7 +908,17 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                 print(f"未能获取数据: {rule_name}")
                 return None
 
-            dfs = [df for df, rules in results if df is not None and not df.empty]
+            # df 为 None 表示这个源根本没取到。多个源合并时只要有一个失败，
+            # 就必须让整组失败：否则会拿"部分来源"生成一份不完整的规则集，
+            # 覆盖掉 Release 上原本完整的那份，订阅方静默少掉一批规则。
+            failed = [link for link, (df, _) in zip(links, results) if df is None]
+            if failed:
+                for link in failed:
+                    print(f"  来源失败: {link}")
+                print(f"{rule_name}: {len(failed)}/{len(links)} 个来源失败，整组跳过以免发布不完整规则集")
+                return None
+
+            dfs = [df for df, rules in results if not df.empty]
 
             # sing-box 源格式的规则原样直通，不经过 DataFrame
             passthrough_rules = []
@@ -822,6 +975,9 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         ip_cidr_entries = []
         domain_keyword_entries = []
         domain_regex_entries = []
+        process_name_entries = []
+        process_path_entries = []
+        network_entries = []
         # 注意：这里没有 geoip。geoip 是 route rule 的字段，不是 headless rule 的，
         # sing-box 会报 json: unknown field "geoip" 并让整个规则集编译失败。
         # GEOIP 规则现在统一落进"丢弃的规则类型"统计里。
@@ -852,6 +1008,18 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                         domain_keyword_entries.append(entry_value)
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
+            elif pattern == 'process_name':
+                process_name_entries.extend([address.strip() for address in addresses])
+            elif pattern == 'process_path':
+                process_path_entries.extend([address.strip() for address in addresses])
+            elif pattern == 'network':
+                # sing-box 只认 tcp / udp
+                for address in addresses:
+                    value = address.strip().lower()
+                    if value in ('tcp', 'udp'):
+                        network_entries.append(value)
+                    else:
+                        print(f"  {rule_name}: 跳过无法识别的 network: {address!r}")
 
             elif pattern == 'port':
                 # 官方字段表里 port / source_port 是整数数组，写成 "80" 会编译失败
@@ -904,6 +1072,15 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         if domain_regex_entries:
             domain_regex_entries = list(set(domain_regex_entries))
             result_rules["rules"].append({'domain_regex': domain_regex_entries})
+
+        if process_name_entries:
+            result_rules["rules"].append({'process_name': list(set(process_name_entries))})
+
+        if process_path_entries:
+            result_rules["rules"].append({'process_path': list(set(process_path_entries))})
+
+        if network_entries:
+            result_rules["rules"].append({'network': list(set(network_entries))})
             
         
         if port_entries:
@@ -947,7 +1124,17 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         except FileNotFoundError:
             print("未找到 sing-box，已生成 json，但跳过 srs 编译")
         except subprocess.CalledProcessError as e:
+            # 编译失败不能当成功返回：调用方只按返回值计数，
+            # CI 又只统计 json，结果会把"这次没生成出来的 srs"
+            # 当成陈旧资产从 Release 上删掉，订阅直接 404。
             print(f"sing-box 编译失败: {file_name}, 错误码: {e.returncode}")
+            for path in (file_name, srs_path):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+            return None
         return file_name
     except Exception as e:
         print(f'生成规则集出错，已跳过：{rule_name}，原因：{str(e)}')
@@ -1001,9 +1188,13 @@ def determine_entry_type(entry):
     return 'domain', entry
 
 def read_links_file():
-    """读取links.txt文件，返回链接和自定义名称的映射"""
-    links = []
-    custom_names = {}
+    """读取 links.txt，返回 [(链接, 规则名或 None), ...]。
+
+    返回列表而不是 {链接: 规则名} 字典：同一个 URL 完全可以被起
+    多个不同的规则名（First / Second），字典会让前面的名字被覆盖，
+    最终只生成最后一个。
+    """
+    entries = []
     
     # 尝试多个可能的路径
     possible_paths = [
@@ -1024,7 +1215,7 @@ def read_links_file():
         print(f"找不到links.txt文件，尝试过以下路径: {possible_paths}")
         print(f"当前工作目录: {os.getcwd()}")
         print(f"目录内容: {os.listdir('.')}")
-        return [], {}
+        return []
     
     try:
         with open(file_path, 'r', encoding='utf-8') as links_file:
@@ -1034,19 +1225,18 @@ def read_links_file():
         
         for line in link_lines:
             line = line.strip()
-            if line and not line.startswith("#"):
-                parts = line.split(maxsplit=1)
-                if len(parts) == 2:
-                    url, custom_name = parts
-                    links.append(url)
-                    custom_names[url] = custom_name
-                else:
-                    links.append(line)
-                    
-        return links, custom_names
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(maxsplit=1)
+            if len(parts) == 2:
+                entries.append((parts[0], parts[1].strip()))
+            else:
+                entries.append((parts[0], None))
+
+        return entries
     except Exception as e:
         print(f"读取links.txt文件失败: {str(e)}")
-        return [], {}
+        return []
 
 def read_custom_config():
     """读取Custom.config文件，返回域名/IP和规则名称的映射"""
@@ -1102,9 +1292,9 @@ def main():
     print(f"目录内容: {os.listdir('.')}")
     
     # 读取links.txt
-    links, custom_names = read_links_file()
-    
-    if not links:
+    entries = read_links_file()
+
+    if not entries:
         print("未能读取到有效的链接，请检查links.txt文件")
         return
         
@@ -1119,12 +1309,12 @@ def main():
     # 按规则名分组：links.txt 里同名的多个链接要合并成一个规则集，
     # 逐条处理会让先写的文件被后写的整个覆盖。
     grouped = {}
-    for link in links:
-        if custom_names and link in custom_names:
-            name = custom_names[link]
-        else:
+    for link, name in entries:
+        if not name:
             name = os.path.basename(link).split('.')[0]
-        grouped.setdefault(name, []).append(link)
+        # 同一个规则名下重复出现同一个 URL 就没必要抓两次
+        if link not in grouped.setdefault(name, []):
+            grouped[name].append(link)
 
     for name, count in ((n, len(ls)) for n, ls in grouped.items() if len(ls) > 1):
         print(f"规则 {name} 由 {count} 个源合并生成")
