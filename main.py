@@ -499,6 +499,16 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         # 删除pattern中包含#号的行
         df = df[~df['pattern'].str.contains('#', na=False)].reset_index(drop=True)
         
+        # 统计被丢弃的规则类型再删除，避免源里混入不支持的类型却无声无息
+        unsupported = df[~df['pattern'].isin(MAP_DICT.keys())]
+        if not unsupported.empty:
+            counts = unsupported['pattern'].astype(str).value_counts()
+            shown = [f"{p[:30]}={n}" for p, n in list(counts.items())[:8]]
+            if len(counts) > 8:
+                shown.append(f"...另有 {len(counts) - 8} 种")
+            print(f"  {rule_name}: 丢弃 {len(unsupported)} 条不支持的规则类型 "
+                  f"({', '.join(shown)})")
+
         # 删除不在字典中的pattern
         df = df[df['pattern'].isin(MAP_DICT.keys())].reset_index(drop=True)
         
