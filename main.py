@@ -13,7 +13,7 @@ from io import StringIO
 MAP_DICT = {'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix', 'host-suffix': 'domain_suffix', 'DOMAIN': 'domain', 'HOST': 'domain', 'host': 'domain',
             'DOMAIN-KEYWORD':'domain_keyword', 'HOST-KEYWORD': 'domain_keyword', 'host-keyword': 'domain_keyword', 'IP-CIDR': 'ip_cidr',
             'ip-cidr': 'ip_cidr', 'IP-CIDR6': 'ip_cidr', 
-            'IP6-CIDR': 'ip_cidr','SRC-IP-CIDR': 'source_ip_cidr', 'GEOIP': 'geoip', 'DST-PORT': 'port',
+            'IP6-CIDR': 'ip_cidr','SRC-IP-CIDR': 'source_ip_cidr', 'DST-PORT': 'port',
             'SRC-PORT': 'source_port', "URL-REGEX": "domain_regex", "DOMAIN-REGEX": "domain_regex"}
 
 # ---------------------------------------------------------------------------
@@ -710,7 +710,9 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         ip_cidr_entries = []
         domain_keyword_entries = []
         domain_regex_entries = []
-        geoip_entries = []
+        # 注意：这里没有 geoip。geoip 是 route rule 的字段，不是 headless rule 的，
+        # sing-box 会报 json: unknown field "geoip" 并让整个规则集编译失败。
+        # GEOIP 规则现在统一落进"丢弃的规则类型"统计里。
         port_entries = []
         source_port_entries = []
         source_ip_cidr_entries = []
@@ -738,8 +740,7 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                         domain_keyword_entries.append(entry_value)
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
-            elif pattern == 'geoip':
-                geoip_entries.extend([address.strip() for address in addresses])
+
             elif pattern == 'port':
                 # 官方字段表里 port / source_port 是整数数组，写成 "80" 会编译失败
                 port_entries.extend(coerce_ports(addresses, rule_name, 'port'))
@@ -792,10 +793,7 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             domain_regex_entries = list(set(domain_regex_entries))
             result_rules["rules"].append({'domain_regex': domain_regex_entries})
             
-        if geoip_entries:
-            geoip_entries = list(set(geoip_entries))
-            result_rules["rules"].append({'geoip': geoip_entries})
-            
+        
         if port_entries:
             port_entries = list(set(port_entries))
             result_rules["rules"].append({'port': port_entries})
