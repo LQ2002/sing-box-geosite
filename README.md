@@ -19,6 +19,7 @@ links.txt 里的链接会自动识别格式，无需额外标注：
 | hosts 文件 | `0.0.0.0 example.com` |
 | 纯域名 / IP 列表 | 一行一个，或空格分隔 |
 | **sing-box 源格式** | 已经是 `{"version": N, "rules": [...]}` 的 json |
+| AND / OR / NOT 复合规则 | Surge、Clash 的逻辑规则，转成 sing-box 的 `type: logical` |
 
 sing-box 源格式的链接采用**原样直通**：不转换成中间表示，
 所以 `process_name`、`network_type`、`port_range`、`invert`、
@@ -28,6 +29,23 @@ sing-box 源格式的链接采用**原样直通**：不转换成中间表示，
 表外的未知字段会被丢弃并在日志里计数 ——
 sing-box 对未知字段是直接报错的（`json: unknown field "xxx"`），
 不过滤会让整个规则集编译失败。
+
+### 复合规则
+
+```
+AND,((DOMAIN,ads.example.com),(DEST-PORT,80)),REJECT
+  -> {"type":"logical","mode":"and","rules":[{"domain":["ads.example.com"]},{"port":[80]}]}
+
+NOT,((DOMAIN,allow.example.com)),REJECT
+  -> {"type":"logical","mode":"and","rules":[...],"invert":true}
+```
+
+支持嵌套。分量里的类型如果 sing-box 没有对应字段（如 `IP-ASN`、`GEOSITE`）：
+
+- **AND / NOT 整条丢弃** —— 少一个条件会让规则变宽，匹配到本不该匹配的流量，比丢规则更危险
+- **OR 保留剩余分量** —— 只会变窄，是安全的
+
+两种情况都会在日志里说明。
 
 同一个规则名下可以混用多种格式的源，会合并成一个文件：
 

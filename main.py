@@ -14,6 +14,9 @@ MAP_DICT = {'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix', 'h
             'DOMAIN-KEYWORD':'domain_keyword', 'HOST-KEYWORD': 'domain_keyword', 'host-keyword': 'domain_keyword', 'IP-CIDR': 'ip_cidr',
             'ip-cidr': 'ip_cidr', 'IP-CIDR6': 'ip_cidr', 
             'IP6-CIDR': 'ip_cidr','SRC-IP-CIDR': 'source_ip_cidr', 'DST-PORT': 'port',
+            'DEST-PORT': 'port',
+            'PROCESS-NAME': 'process_name', 'PROCESS-PATH': 'process_path',
+            'NETWORK': 'network',
             'SRC-PORT': 'source_port', "URL-REGEX": "domain_regex", "DOMAIN-REGEX": "domain_regex"}
 
 # ---------------------------------------------------------------------------
@@ -241,6 +244,119 @@ def parse_plain_domain_list(content):
 
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
 
+SURGE_LOGICAL_KEYWORDS = {'AND', 'OR', 'NOT'}
+
+
+def split_top_level(text):
+    """按顶层逗号切分，括号内部的逗号不算分隔符。"""
+    parts = []
+    depth = 0
+    buf = []
+    for ch in text:
+        if ch == '(':
+            depth += 1
+            buf.append(ch)
+        elif ch == ')':
+            depth -= 1
+            buf.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    parts.append(''.join(buf).strip())
+    return [p for p in parts if p]
+
+
+def parse_surge_logical_component(component):
+    """把 Surge/Clash 的一个复合规则分量转成 sing-box headless rule。
+
+    支持嵌套，例如 AND,((OR,((DOMAIN,a.com),(DOMAIN,b.com))),(DEST-PORT,443)),REJECT
+    """
+    component = component.strip()
+    if component.startswith('(') and component.endswith(')'):
+        component = component[1:-1].strip()
+    if not component:
+        return None
+
+    head, _, rest = component.partition(',')
+    head = head.strip().upper()
+
+    if head in SURGE_LOGICAL_KEYWORDS:
+        parts = split_top_level(rest)
+        if not parts:
+            return None
+        # parts[0] 是括号包起来的分量组，后面可能还跟着策略名（REJECT/DIRECT/...）
+        group = parts[0].strip()
+        if group.startswith('(') and group.endswith(')'):
+            group = group[1:-1].strip()
+
+        sub_rules = []
+        dropped = 0
+        for part in split_top_level(group):
+            parsed = parse_surge_logical_component(part)
+            if parsed:
+                sub_rules.append(parsed)
+            else:
+                dropped += 1
+
+        if not sub_rules:
+            return None
+
+        # AND / NOT 少一个条件会让规则变宽（匹配到本不该匹配的流量），
+        # 这种降级比丢规则更危险，所以整条丢弃。
+        # OR 少一个条件只是变窄，保留剩下的是安全的。
+        if dropped and head in ('AND', 'NOT'):
+            print(f"  复合规则有 {dropped} 个分量无法映射，整条丢弃: {component[:70]}")
+            return None
+
+        rule = {
+            'type': 'logical',
+            'mode': 'or' if head == 'OR' else 'and',
+            'rules': sub_rules,
+        }
+        # sing-box 没有 NOT，用 invert 表达取反
+        if head == 'NOT':
+            rule['invert'] = True
+        return rule
+
+    # 叶子分量：精确取键，不能用子串匹配。
+    # 子串匹配会让 SRC-IP-CIDR,10.0.0.0/8 同时命中 IP-CIDR，多出一条错误规则。
+    field = MAP_DICT.get(head)
+    if field is None:
+        return None
+    value = clean_rule_value(rest)
+    if not value:
+        return None
+    return {field: [value]}
+
+
+def extract_surge_logical_rules(content, stats=None):
+    """扫描文本里的 AND / OR / NOT 复合规则。
+
+    必须在进 DataFrame 之前单独扫一遍：这些行字段数不定，
+    pd.read_csv 固定 5 列 + on_bad_lines='skip' 会直接把它们丢掉。
+    """
+    if stats is None:
+        stats = {}
+    rules = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or line.startswith(';'):
+            continue
+        if line.split(',', 1)[0].strip().upper() not in SURGE_LOGICAL_KEYWORDS:
+            continue
+        parsed = parse_surge_logical_component(line)
+        if not parsed:
+            continue
+        cleaned = sanitize_singbox_rule(parsed, stats)
+        if cleaned:
+            rules.append(cleaned)
+    if rules:
+        print(f"  解析出 {len(rules)} 条 AND/OR/NOT 复合规则")
+    return rules
+
+
 def is_singbox_rule_set(data):
     """判断对象是否为 sing-box source format 规则集。
 
@@ -398,33 +514,12 @@ def read_list_from_url(url):
                 csv_data = StringIO(response.text)
                 df = pd.read_csv(csv_data, header=None, names=['pattern', 'address', 'other', 'other2', 'other3'], on_bad_lines='skip')
                 
-                filtered_rows = []
-                rules = []
-                # 处理逻辑规则
-                if 'AND' in df['pattern'].values:
-                    and_rows = df[df['pattern'].str.contains('AND', na=False)]
-                    for _, row in and_rows.iterrows():
-                        rule = {
-                            "type": "logical",
-                            "mode": "and",
-                            "rules": []
-                        }
-                        pattern = ",".join(row.values.astype(str))
-                        components = re.findall(r'\((.*?)\)', pattern)
-                        for component in components:
-                            for keyword in MAP_DICT.keys():
-                                if keyword in component:
-                                    match = re.search(f'{keyword},(.*)', component)
-                                    if match:
-                                        value = match.group(1)
-                                        rule["rules"].append({
-                                            MAP_DICT[keyword]: value
-                                        })
-                        rules.append(rule)
-                for index, row in df.iterrows():
-                    if 'AND' not in row['pattern']:
-                        filtered_rows.append(row)
-                df_filtered = pd.DataFrame(filtered_rows, columns=['pattern', 'address', 'other', 'other2', 'other3'])
+                # 复合规则从原始文本里扫，不能指望 CSV：
+                # 这些行字段数不定，会被 on_bad_lines='skip' 整行丢弃
+                rules = extract_surge_logical_rules(response.text)
+
+                df_filtered = df[~df['pattern'].astype(str).str.upper().isin(SURGE_LOGICAL_KEYWORDS)]
+                df_filtered = df_filtered.reset_index(drop=True)
                 return df_filtered, rules
             except Exception as e:
                 print(f"解析URL内容失败: {url}, 错误: {str(e)}")
@@ -572,8 +667,20 @@ def parse_and_convert_to_dataframe(link):
                     else:
                         items = []
                 
+                logical_rules = []
+                logical_stats = {}
+
                 for item in items:
                     address = item.strip("'")
+
+                    # payload 里也可能有 AND/OR/NOT 复合规则
+                    if str(item).split(',', 1)[0].strip().upper() in SURGE_LOGICAL_KEYWORDS:
+                        parsed = parse_surge_logical_component(str(item))
+                        cleaned = sanitize_singbox_rule(parsed, logical_stats) if parsed else None
+                        if cleaned:
+                            logical_rules.append(cleaned)
+                        continue
+
                     if ',' not in item:
                         if is_ipv4_or_ipv6(item):
                             pattern = 'IP-CIDR'
@@ -598,10 +705,15 @@ def parse_and_convert_to_dataframe(link):
                     
                     rows.append({'pattern': pattern.strip(), 'address': address.strip(), 'other': None})
                 
+                if logical_rules:
+                    print(f"  解析出 {len(logical_rules)} 条 AND/OR/NOT 复合规则")
+
                 if rows:
                     df = pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
                 else:
                     df = pd.DataFrame(columns=['pattern', 'address', 'other'])
+
+                rules = logical_rules
             except Exception as e:
                 print(f"解析YAML/TXT失败: {link}, 错误: {str(e)}")
                 df, rules = read_list_from_url(link)
