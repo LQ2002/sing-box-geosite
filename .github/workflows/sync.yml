@@ -7,12 +7,20 @@ on:
   schedule:
     - cron: '0 4 * * *'
 
+# 只需要写 Releases，不再往仓库推提交
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: latest
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v7
+
     - name: "Setup sing-box"
       run: |
           set -Eeuo pipefail
@@ -26,34 +34,68 @@ jobs:
           echo "Downloading $SING_BOX_DEB_URL"
           wget -O sing-box.deb "$SING_BOX_DEB_URL"
           sudo dpkg -i sing-box.deb
+
     - name: Set up Python3
       uses: actions/setup-python@v6
       with:
         python-version: 3.x
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pandas requests pyyaml
 
     - name: Prepare directories
-      run: |
-        mkdir -p ./rule/
+      run: mkdir -p ./rule/
 
     - name: Run script
       run: python ../main.py
       working-directory: ./rule/
-    - name: Commit and push config.json
-      run: |
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
-        git add ./rule/*.json
-        git add ./rule/*.srs
 
-        # 检查是否有文件被修改
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-          exit 0
-        else
-          git commit -m "ci: Update rules"
-          git push
+    - name: Sanity check generated files
+      run: |
+        set -Eeuo pipefail
+        # 生成失败时宁可保留上一版 release，也不要把 release 清空
+        count=$(find ./rule -maxdepth 1 -type f \( -name '*.json' -o -name '*.srs' \) | wc -l)
+        echo "Generated $count files"
+        if [ "$count" -lt 2 ]; then
+          echo "::error::生成的规则文件过少，疑似脚本失败，中止发布"
+          exit 1
         fi
+        ls -la ./rule/
+
+    - name: Publish to rolling release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -Eeuo pipefail
+
+        # 1. release 不存在则创建（tag 指向当前 commit）
+        if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Rule sets (rolling)" \
+            --notes "自动生成的 sing-box 规则集，每次构建覆盖。" \
+            --latest
+        fi
+
+        # 2. 先上传新文件（--clobber 覆盖同名资产），保证链接不断流
+        gh release upload "$RELEASE_TAG" ./rule/* --clobber
+
+        # 3. 再删除本次没有生成的陈旧资产（links.txt 里已移除的规则）
+        find ./rule -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/current.txt
+        gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' | sort > /tmp/remote.txt
+        comm -13 /tmp/current.txt /tmp/remote.txt > /tmp/stale.txt
+        while read -r asset; do
+          [ -z "$asset" ] && continue
+          echo "Deleting stale asset: $asset"
+          gh release delete-asset "$RELEASE_TAG" "$asset" --yes
+        done < /tmp/stale.txt
+
+        # 4. 刷新发布说明里的时间戳
+        gh release edit "$RELEASE_TAG" \
+          --notes "自动生成的 sing-box 规则集，每次构建覆盖。
+
+最后更新: $(date -u '+%Y-%m-%d %H:%M:%S') UTC
+来源提交: $GITHUB_SHA" \
+          --latest
