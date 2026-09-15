@@ -275,12 +275,18 @@ def read_list_from_url(url):
         return pd.DataFrame(columns=['pattern', 'address', 'other', 'other2', 'other3']), []
 
 def is_ipv4_or_ipv6(address):
+    """判断字符串是否为 IPv4/IPv6 地址或网段。
+
+    strict=False：允许 10.0.0.1/24 这类主机位未清零的写法。
+    用 strict=True 会让它们抛 ValueError 被误判成域名，
+    最终以 DOMAIN 的身份混进 domain 列表。
+    """
     try:
-        ipaddress.IPv4Network(address)
+        ipaddress.IPv4Network(address, strict=False)
         return 'ipv4'
     except ValueError:
         try:
-            ipaddress.IPv6Network(address)
+            ipaddress.IPv6Network(address, strict=False)
             return 'ipv6'
         except ValueError:
             return None
@@ -455,33 +461,39 @@ def sort_dict(obj):
     else:
         return obj
 
-def parse_list_file(link, output_directory, custom_names=None, custom_entries=None):
+def parse_list_file(links, rule_name, output_directory, custom_entries=None):
+    """把同一个规则名下的所有链接合并成一个规则集文件。
+
+    links 是列表：links.txt 里允许多行共用一个名称，
+    这些源必须合并写入，早期实现按单链接覆写会让先处理的源被后者整个盖掉。
+    """
+    if isinstance(links, str):
+        links = [links]
     try:
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            results = list(executor.map(parse_and_convert_to_dataframe, [link]))
-            
+            results = list(executor.map(parse_and_convert_to_dataframe, links))
+
             # 检查结果是否有效
             if not results or len(results) == 0:
-                print(f"未能获取数据: {link}")
+                print(f"未能获取数据: {rule_name}")
                 return None
-                
-            dfs = [df for df, rules in results if df is not None]
-            rules_list = [rules for df, rules in results if rules is not None]
-            
+
+            dfs = [df for df, rules in results if df is not None and not df.empty]
+
             # 检查是否有有效的DataFrame
             if not dfs:
-                print(f"未获取到有效数据: {link}")
+                print(f"未获取到有效数据: {rule_name}")
                 return None
-                
+
             try:
                 df = pd.concat(dfs, ignore_index=True)
             except Exception as e:
-                print(f"合并DataFrame失败: {link}, 错误: {str(e)}")
+                print(f"合并DataFrame失败: {rule_name}, 错误: {str(e)}")
                 df = pd.DataFrame(columns=['pattern', 'address', 'other'])
                 
         # 确保df有必要的列
         if 'pattern' not in df.columns:
-            print(f"DataFrame缺少pattern列: {link}")
+            print(f"DataFrame缺少pattern列: {rule_name}")
             return None
             
         # 删除pattern中包含#号的行
@@ -492,7 +504,7 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
         
         # 如果DataFrame为空，返回None
         if df.empty:
-            print(f"过滤后DataFrame为空: {link}")
+            print(f"过滤后DataFrame为空: {rule_name}")
             return None
         
         df = df.drop_duplicates().reset_index(drop=True)  # 删除重复行
@@ -517,7 +529,13 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
             elif pattern == 'domain':
                 domain_entries.extend([address.strip() for address in addresses])
             elif pattern == 'ip_cidr':
-                ip_cidr_entries.extend([address.strip() for address in addresses])
+                # 规范化：统一小写、清零主机位，否则同一网段的不同写法去重不掉
+                for address in addresses:
+                    normalized = normalize_ip_cidr(address)
+                    if normalized:
+                        ip_cidr_entries.append(normalized)
+                    else:
+                        print(f"  跳过无法解析的 ip_cidr: {address!r}")
             elif pattern == 'domain_keyword':
                 for address in addresses:
                     entry_type, entry_value = convert_domain_keyword_value(address)
@@ -534,14 +552,13 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
             elif pattern == 'source_port':
                 source_port_entries.extend([address.strip() for address in addresses])
             elif pattern == 'source_ip_cidr':
-                source_ip_cidr_entries.extend([address.strip() for address in addresses])
+                for address in addresses:
+                    normalized = normalize_ip_cidr(address)
+                    if normalized:
+                        source_ip_cidr_entries.append(normalized)
+                    else:
+                        print(f"  跳过无法解析的 source_ip_cidr: {address!r}")
                 
-        # 获取规则名称
-        if custom_names and link in custom_names:
-            rule_name = custom_names[link]
-        else:
-            rule_name = os.path.basename(link).split('.')[0]
-            
         # 处理Custom.config中的自定义条目
         if custom_entries and rule_name in custom_entries:
             for entry in custom_entries[rule_name]:
@@ -601,8 +618,9 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
         file_name = os.path.join(output_directory, f"{rule_name}.json")
         
         with open(file_name, 'w', encoding='utf-8') as output_file:
+            # 不要再对 json.dumps 的结果做反斜杠替换：
+            # 它会把 domain_regex 里合法的 \\ 转义压成单个 \，产出非法 JSON
             result_rules_str = json.dumps(sort_dict(result_rules), ensure_ascii=False, indent=2)
-            result_rules_str = result_rules_str.replace('\\\\', '\\')
             output_file.write(result_rules_str)
 
         srs_path = file_name.replace(".json", ".srs")
@@ -614,7 +632,7 @@ def parse_list_file(link, output_directory, custom_names=None, custom_entries=No
             print(f"sing-box 编译失败: {file_name}, 错误码: {e.returncode}")
         return file_name
     except Exception as e:
-        print(f'获取链接出错，已跳过：{link}，原因：{str(e)}')
+        print(f'生成规则集出错，已跳过：{rule_name}，原因：{str(e)}')
         return None
 
 def determine_entry_type(entry):
@@ -763,22 +781,39 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     result_file_names = []
     
+    # 按规则名分组：links.txt 里同名的多个链接要合并成一个规则集，
+    # 逐条处理会让先写的文件被后写的整个覆盖。
+    grouped = {}
     for link in links:
+        if custom_names and link in custom_names:
+            name = custom_names[link]
+        else:
+            name = os.path.basename(link).split('.')[0]
+        grouped.setdefault(name, []).append(link)
+
+    for name, count in ((n, len(ls)) for n, ls in grouped.items() if len(ls) > 1):
+        print(f"规则 {name} 由 {count} 个源合并生成")
+
+    failed = []
+    for rule_name, group_links in grouped.items():
         result_file_name = parse_list_file(
-            link, 
-            output_directory=output_dir, 
-            custom_names=custom_names,
+            group_links,
+            rule_name,
+            output_directory=output_dir,
             custom_entries=custom_entries
         )
-        
+
         if result_file_name:
             result_file_names.append(result_file_name)
-            print(f"成功处理: {link} -> {result_file_name}")
+            print(f"成功处理: {rule_name} ({len(group_links)} 个源) -> {result_file_name}")
         else:
-            print(f"处理失败: {link}")
-    
+            failed.append(rule_name)
+            print(f"处理失败: {rule_name}")
+
     # 打印生成的文件名总数
-    print(f"成功生成 {len(result_file_names)} 个文件")
+    print(f"成功生成 {len(result_file_names)}/{len(grouped)} 个文件")
+    if failed:
+        print(f"失败的规则: {', '.join(failed)}")
 
 if __name__ == "__main__":
     main()
