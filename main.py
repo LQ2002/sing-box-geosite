@@ -258,18 +258,26 @@ def parse_plain_domain_list(content):
             is_suffix = raw.startswith('.') or raw.startswith('+.')
 
             token = clean_plain_token(raw_token)
-            if not token or token in seen:
+            if not token:
                 continue
             if not looks_like_domain(token):
                 continue
-            seen.add(token)
+
             if is_ipv4_or_ipv6(token):
-                rows.append({'pattern': 'IP-CIDR', 'address': token, 'other': None})
+                pattern = 'IP-CIDR'
             elif is_suffix:
-                rows.append({'pattern': 'DOMAIN-SUFFIX', 'address': token, 'other': None})
+                pattern = 'DOMAIN-SUFFIX'
             else:
                 # 没有前导点就按 DOMAIN 处理，避免把 example.com 误扩大成后缀
-                rows.append({'pattern': 'DOMAIN', 'address': token, 'other': None})
+                pattern = 'DOMAIN'
+
+            # 去重键要带上类型：example.com 和 .example.com 是两条不同的规则，
+            # 只按取值去重会让后出现的那条被丢掉，结果取决于书写顺序。
+            key = (pattern, token)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({'pattern': pattern, 'address': token, 'other': None})
 
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
 
@@ -299,15 +307,12 @@ def split_top_level(text):
 
 def parse_surge_logical_component(component):
     """把 Surge/Clash 的一个复合规则分量转成 sing-box headless rule。"""
-    rule, _ = _parse_surge_logical_component(component)
+    rule, _, _ = _parse_surge_logical_component(component)
     return rule
 
 
 def _parse_surge_logical_component(component):
-    """返回 (规则或 None, 是否有分量没能完整映射)。
-
-    lossy 必须向上传播：NOT(OR(A, 不支持的条件)) 如果只在内层
-    静默丢掉一个分量，外层取反之后会匹配到原本被排除的流量。
+    """返回 (规则或 None, narrowed, widened)，方向定义见 _sanitize_singbox_rule。
 
     支持嵌套，例如 AND,((OR,((DOMAIN,a.com),(DOMAIN,b.com))),(DEST-PORT,443)),REJECT
     """
@@ -315,7 +320,7 @@ def _parse_surge_logical_component(component):
     if component.startswith('(') and component.endswith(')'):
         component = component[1:-1].strip()
     if not component:
-        return None, True
+        return None, False, False
 
     head, _, rest = component.partition(',')
     head = head.strip().upper()
@@ -323,54 +328,63 @@ def _parse_surge_logical_component(component):
     if head in SURGE_LOGICAL_KEYWORDS:
         parts = split_top_level(rest)
         if not parts:
-            return None, True
+            return None, False, False
         # parts[0] 是括号包起来的分量组，后面可能还跟着策略名（REJECT/DIRECT/...）
         group = parts[0].strip()
         if group.startswith('(') and group.endswith(')'):
             group = group[1:-1].strip()
 
         sub_rules = []
-        lossy = False
+        child_dropped = False
+        narrowed = False
+        widened = False
         for part in split_top_level(group):
-            parsed, part_lossy = _parse_surge_logical_component(part)
+            parsed, part_narrowed, part_widened = _parse_surge_logical_component(part)
             if parsed is None:
-                lossy = True
+                child_dropped = True
                 continue
-            if part_lossy:
-                # 子分量自身就是残缺的，例如内层 OR 丢了一个条件
-                lossy = True
+            narrowed = narrowed or part_narrowed
+            widened = widened or part_widened
             sub_rules.append(parsed)
 
         if not sub_rules:
-            return None, True
+            return None, False, False
 
-        # AND / NOT 少一个条件会让规则变宽（匹配到本不该匹配的流量），
-        # 这种降级比丢规则更危险，所以整条丢弃。
-        # OR 少一个条件只是变窄，保留剩下的是安全的——
-        # 但 lossy 要继续往上传，外层若是 AND 或 NOT，收窄会翻转成放宽。
-        if lossy and head in ('AND', 'NOT'):
-            print(f"  复合规则有分量无法完整映射，整条丢弃: {component[:70]}")
-            return None, True
+        mode = 'or' if head == 'OR' else 'and'
+        if mode == 'and':
+            widened = widened or child_dropped
+        else:
+            narrowed = narrowed or child_dropped
 
-        rule = {
-            'type': 'logical',
-            'mode': 'or' if head == 'OR' else 'and',
-            'rules': sub_rules,
-        }
-        # sing-box 没有 NOT，用 invert 表达取反
-        if head == 'NOT':
+        # sing-box 没有 NOT，用 invert 表达取反；取反会把变宽变窄对调
+        inverted = head == 'NOT'
+        if inverted:
+            narrowed, widened = widened, narrowed
+
+        if widened:
+            print(f"  复合规则丢分量后会放宽匹配，整条丢弃: {component[:70]}")
+            return None, False, False
+
+        rule = {'type': 'logical', 'mode': mode, 'rules': sub_rules}
+        if inverted:
             rule['invert'] = True
-        return rule, lossy
+        return rule, narrowed, False
 
     # 叶子分量：精确取键，不能用子串匹配。
     # 子串匹配会让 SRC-IP-CIDR,10.0.0.0/8 同时命中 IP-CIDR，多出一条错误规则。
     field = MAP_DICT.get(head)
     if field is None:
-        return None, True
-    value = clean_rule_value(rest)
+        return None, False, False
+
+    # 正则的值里可以合法地出现逗号，不能按逗号截断
+    if head in REGEX_PATTERNS:
+        value = strip_trailing_policy(rest)
+    else:
+        value = clean_rule_value(rest)
+
     if not value:
-        return None, True
-    return {field: [value]}, False
+        return None, False, False
+    return {field: [value]}, False, False
 
 
 def extract_surge_logical_rules(content, stats=None):
@@ -418,29 +432,40 @@ def _as_list(value):
 
 def sanitize_singbox_rule(rule, stats, depth=0):
     """按官方字段表清洗一条 headless rule，返回清洗后的规则或 None。"""
-    cleaned, _ = _sanitize_singbox_rule(rule, stats, depth)
+    cleaned, _, _ = _sanitize_singbox_rule(rule, stats, depth)
     return cleaned
 
 
 def _sanitize_singbox_rule(rule, stats, depth=0):
-    """清洗一条 headless rule，返回 (规则或 None, 是否发生了会放宽匹配的丢弃)。
+    """清洗一条 headless rule，返回 (规则或 None, narrowed, widened)。
 
     来源是远端 URL，不能直接信任：字段表之外的键一律丢弃，
     否则 sing-box 会报 unknown field 让整个规则集编译失败。
 
-    关键在于"丢掉什么会放宽匹配"：
-    - 一条 default rule 内的多个字段是 AND 关系，整个字段消失 => 放宽
-    - logical and 少一个子规则 => 放宽
-    - logical or 少一个子规则 => 收窄，本身安全，但要向上传播：
-      外层若是 and 或带 invert，收窄会翻转成放宽
-    - 字段内少掉个别取值（某条 CIDR 解析不了）=> 收窄，安全
+    丢东西分两种，必须分开记账，因为 invert 会把两者对调：
 
-    放宽是危险的（REJECT 规则会误杀本不该拦的流量），所以一旦发生就整条丢弃。
+      narrowed  清洗后匹配到的集合比原意更小
+      widened   更大
+
+    各处的方向：
+      - 一条 default rule 内多个字段是 AND 关系
+          整个字段消失        -> widened
+          字段内少掉个别取值  -> narrowed
+      - logical and
+          少一个子规则        -> widened
+          子规则变窄          -> narrowed
+      - logical or
+          少一个子规则        -> narrowed
+          子规则变宽          -> widened
+      - invert / NOT：把该节点的 narrowed 和 widened 互换
+
+    widened 是危险的（REJECT 规则会误杀本不该拦的流量），
+    一旦出现就整条丢弃；narrowed 只是漏规则，允许保留。
     """
     if rule.get('type') == 'logical':
         if depth >= SINGBOX_LOGICAL_MAX_DEPTH:
             stats['logical(嵌套过深)'] = stats.get('logical(嵌套过深)', 0) + 1
-            return None, True
+            return None, False, True
 
         mode = str(rule.get('mode', 'and')).lower()
         if mode not in ('and', 'or'):
@@ -448,34 +473,45 @@ def _sanitize_singbox_rule(rule, stats, depth=0):
         inverted = bool(rule.get('invert'))
 
         sub_rules = []
-        lossy = False
+        child_dropped = False
+        narrowed = False
+        widened = False
         for sub in _as_list(rule.get('rules', [])):
             if not isinstance(sub, dict):
-                lossy = True
+                child_dropped = True
                 continue
-            cleaned, sub_lossy = _sanitize_singbox_rule(sub, stats, depth + 1)
+            cleaned, sub_narrowed, sub_widened = _sanitize_singbox_rule(sub, stats, depth + 1)
             if cleaned is None:
-                lossy = True
+                child_dropped = True
                 continue
-            if sub_lossy:
-                lossy = True
+            narrowed = narrowed or sub_narrowed
+            widened = widened or sub_widened
             sub_rules.append(cleaned)
 
         if not sub_rules:
-            return None, True
+            return None, False, True
 
-        # and 少条件是放宽；or 带 invert 时收窄会翻转成放宽。两者都失败关闭。
-        if lossy and (mode == 'and' or inverted):
-            stats['logical(子条件缺失,整条丢弃)'] = stats.get('logical(子条件缺失,整条丢弃)', 0) + 1
-            return None, True
+        if mode == 'and':
+            widened = widened or child_dropped
+        else:
+            narrowed = narrowed or child_dropped
+
+        if inverted:
+            narrowed, widened = widened, narrowed
+
+        if widened:
+            stats['logical(会放宽匹配,整条丢弃)'] = stats.get('logical(会放宽匹配,整条丢弃)', 0) + 1
+            return None, False, True
 
         out = {'type': 'logical', 'mode': mode, 'rules': sub_rules}
         if inverted:
             out['invert'] = True
-        return out, lossy
+        return out, narrowed, False
 
     out = {}
     dropped_field = False
+    dropped_element = False
+    inverted = False
 
     for field, value in rule.items():
         if field == 'type':
@@ -484,6 +520,7 @@ def _sanitize_singbox_rule(rule, stats, depth=0):
         if field == 'invert':
             if value:
                 out['invert'] = True
+                inverted = True
             continue
 
         if field in SINGBOX_BOOL_FIELDS:
@@ -498,16 +535,20 @@ def _sanitize_singbox_rule(rule, stats, depth=0):
             continue
 
         if field in SINGBOX_INT_ARRAY_FIELDS:
-            ports = coerce_ports(_as_list(value), '<sing-box>', field)
+            raw = _as_list(value)
+            ports = coerce_ports(raw, '<sing-box>', field)
             if ports:
                 out[field] = ports
+                if len(ports) < len(raw):
+                    dropped_element = True
             else:
                 dropped_field = True
             continue
 
         if field in SINGBOX_CIDR_ARRAY_FIELDS:
+            raw = _as_list(value)
             cidrs = []
-            for item in _as_list(value):
+            for item in raw:
                 normalized = normalize_ip_cidr(item)
                 if normalized:
                     cidrs.append(normalized)
@@ -515,22 +556,30 @@ def _sanitize_singbox_rule(rule, stats, depth=0):
                     stats[f'{field}(无法解析)'] = stats.get(f'{field}(无法解析)', 0) + 1
             if cidrs:
                 out[field] = cidrs
+                if len(cidrs) < len(raw):
+                    dropped_element = True
             else:
                 dropped_field = True
             continue
 
         if field in SINGBOX_MIXED_ARRAY_FIELDS:
-            items = [v for v in _as_list(value) if isinstance(v, (int, str))]
+            raw = _as_list(value)
+            items = [v for v in raw if isinstance(v, (int, str))]
             if items:
                 out[field] = items
+                if len(items) < len(raw):
+                    dropped_element = True
             else:
                 dropped_field = True
             continue
 
         if field in SINGBOX_STRING_ARRAY_FIELDS:
-            items = [str(v).strip() for v in _as_list(value) if str(v).strip()]
+            raw = _as_list(value)
+            items = [str(v).strip() for v in raw if str(v).strip()]
             if items:
                 out[field] = items
+                if len(items) < len(raw):
+                    dropped_element = True
             else:
                 dropped_field = True
             continue
@@ -539,15 +588,18 @@ def _sanitize_singbox_rule(rule, stats, depth=0):
         stats[field] = stats.get(field, 0) + (len(value) if isinstance(value, list) else 1)
         dropped_field = True
 
-    # 同一条规则内的字段是 AND 关系，少一个字段就等于放宽，整条丢弃
-    if dropped_field:
-        stats['rule(字段缺失,整条丢弃)'] = stats.get('rule(字段缺失,整条丢弃)', 0) + 1
-        return None, True
+    narrowed, widened = dropped_element, dropped_field
+    if inverted:
+        narrowed, widened = widened, narrowed
+
+    if widened:
+        stats['rule(会放宽匹配,整条丢弃)'] = stats.get('rule(会放宽匹配,整条丢弃)', 0) + 1
+        return None, False, True
 
     if not out:
-        return None, True
+        return None, False, True
 
-    return out, False
+    return out, narrowed, False
 
 
 def parse_singbox_rule_set(data, url=''):
@@ -587,6 +639,20 @@ KNOWN_POLICIES = {
 }
 
 
+def strip_trailing_policy(value):
+    r"""正则值整体保留，只在末尾确实是已知策略名时剥掉。
+
+    正则里可以合法地出现逗号（例如 ^ad[0-9]{1,3}\.x$），
+    所以不能像普通规则那样按第一个逗号截断。
+    """
+    value = value.strip()
+    if ',' in value:
+        body, _, tail = value.rpartition(',')
+        if tail.strip() in KNOWN_POLICIES:
+            value = body.strip()
+    return value
+
+
 def parse_rule_line(line):
     """把一行 Clash/Surge 规则拆成 (pattern, address)。
 
@@ -606,13 +672,7 @@ def parse_rule_line(line):
         return None
 
     if pattern.upper() in REGEX_PATTERNS:
-        # 正则值整体保留，只在末尾确实是已知策略时剥掉
-        value = rest.strip()
-        if ',' in value:
-            body, _, tail = value.rpartition(',')
-            if tail.strip() in KNOWN_POLICIES:
-                value = body.strip()
-        return pattern, value
+        return pattern, strip_trailing_policy(rest)
 
     return pattern, clean_rule_value(rest)
 
@@ -717,16 +777,24 @@ def read_list_from_url(url):
             return None, []
 
         try:
-            # 最优先：已经是 sing-box source format 就原样直通，不走文本解析
-            if response.text.lstrip().startswith('{'):
+            # 最优先：已经是 sing-box source format 就原样直通，不走文本解析。
+            # 一旦内容看起来是 JSON，就必须按 JSON 处理到底：解析失败或
+            # 结构不对都直接判这个源失败，绝不能回退到文本解析——
+            # 截断的 json 会被按行切出若干垃圾行，随后在过滤阶段悄悄消失，
+            # 和别的源一合并就成了"成功但少了一半规则"。
+            stripped = response.text.lstrip()
+            if stripped.startswith('{') or stripped.startswith('['):
                 try:
                     singbox_data = json.loads(response.text)
-                except ValueError:
-                    singbox_data = None
-                if is_singbox_rule_set(singbox_data):
-                    print(f"检测到 sing-box 源格式规则集: {url}")
-                    empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
-                    return empty, parse_singbox_rule_set(singbox_data, url)
+                except ValueError as e:
+                    print(f"内容是 JSON 但解析失败: {url}, 错误: {str(e)}")
+                    return None, []
+                if not is_singbox_rule_set(singbox_data):
+                    print(f"内容是 JSON 但不是 sing-box 规则集结构: {url}")
+                    return None, []
+                print(f"检测到 sing-box 源格式规则集: {url}")
+                empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
+                return empty, parse_singbox_rule_set(singbox_data, url)
 
             # Clash 的 payload: 结构按内容识别，不看 URL 后缀
             payload_df, payload_rules = try_parse_clash_payload(response.text, url)
@@ -1361,6 +1429,28 @@ def read_custom_config():
         print(f"读取Custom.config文件失败: {str(e)}")
         return {}
 
+def write_build_report(expected, generated, failed):
+    """把本次构建的规则名清单写到 BUILD_REPORT 指定的文件。
+
+    CI 需要知道"这次应该产出哪些规则集"才能判断要不要清理陈旧资产。
+    让 CI 自己从 links.txt 数是不行的：{tag} 一行会展开成多个规则集，
+    按行数只会数到 1，于是即使有规则失败也满足 actual >= expected，
+    照样开清理，把失败规则在 Release 上的旧资产删掉。
+
+    清单由主程序输出，展开逻辑只有一份，不会和 CI 脱节。
+    """
+    path = os.environ.get('BUILD_REPORT')
+    if not path:
+        return
+    report = {'expected': expected, 'generated': generated, 'failed': failed}
+    try:
+        with open(path, 'w', encoding='utf-8') as fp:
+            json.dump(report, fp, ensure_ascii=False, indent=2)
+        print(f"构建清单已写出: {path}")
+    except OSError as e:
+        print(f"构建清单写出失败（不影响产物）: {path}, 错误: {str(e)}")
+
+
 def main():
     # 显示当前目录结构，帮助调试
     print(f"当前工作目录: {os.getcwd()}")
@@ -1395,6 +1485,7 @@ def main():
         print(f"规则 {name} 由 {count} 个源合并生成")
 
     failed = []
+    succeeded = []
     for rule_name, group_links in grouped.items():
         result_file_name = parse_list_file(
             group_links,
@@ -1405,6 +1496,7 @@ def main():
 
         if result_file_name:
             result_file_names.append(result_file_name)
+            succeeded.append(rule_name)
             print(f"成功处理: {rule_name} ({len(group_links)} 个源) -> {result_file_name}")
         else:
             failed.append(rule_name)
@@ -1414,6 +1506,8 @@ def main():
     print(f"成功生成 {len(result_file_names)}/{len(grouped)} 个文件")
     if failed:
         print(f"失败的规则: {', '.join(failed)}")
+
+    write_build_report(sorted(grouped), sorted(succeeded), sorted(failed))
 
 if __name__ == "__main__":
     main()
