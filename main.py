@@ -16,6 +16,30 @@ MAP_DICT = {'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix', 'h
             'IP6-CIDR': 'ip_cidr','SRC-IP-CIDR': 'source_ip_cidr', 'GEOIP': 'geoip', 'DST-PORT': 'port',
             'SRC-PORT': 'source_port', "URL-REGEX": "domain_regex", "DOMAIN-REGEX": "domain_regex"}
 
+# ---------------------------------------------------------------------------
+# sing-box source format 的 headless rule 字段表
+# 依据 https://sing-box.sagernet.org/configuration/rule-set/headless-rule/
+# 这些字段绝大多数在本脚本的 (pattern, address) 中间表示里无法表达，
+# 所以 sing-box 源格式的规则采用原样直通，不经过 DataFrame。
+# ---------------------------------------------------------------------------
+SINGBOX_STRING_ARRAY_FIELDS = {
+    'network', 'domain', 'domain_suffix', 'domain_keyword', 'domain_regex',
+    'source_port_range', 'port_range',
+    'process_name', 'process_path', 'process_path_regex',
+    'package_name', 'package_name_regex',
+    'network_type', 'default_interface_address',
+    'wifi_ssid', 'wifi_bssid',
+}
+SINGBOX_INT_ARRAY_FIELDS = {'port', 'source_port'}
+SINGBOX_CIDR_ARRAY_FIELDS = {'ip_cidr', 'source_ip_cidr'}
+# query_type 允许数字和字符串混排，例如 ["A", "HTTPS", 32768]
+SINGBOX_MIXED_ARRAY_FIELDS = {'query_type'}
+SINGBOX_BOOL_FIELDS = {
+    'network_is_expensive', 'network_is_constrained', 'network_is_constrainted',
+}
+SINGBOX_OBJECT_FIELDS = {'network_interface_address'}
+SINGBOX_LOGICAL_MAX_DEPTH = 8
+
 def read_yaml_from_url(url):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -212,13 +236,148 @@ def parse_plain_domain_list(content):
 
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
 
+def is_singbox_rule_set(data):
+    """判断对象是否为 sing-box source format 规则集。
+
+    形如 {"version": 4, "rules": [{"domain": [...], "ip_cidr": [...]}]}
+    """
+    if not isinstance(data, dict):
+        return False
+    rules = data.get('rules')
+    if not isinstance(rules, list) or not rules:
+        return False
+    return all(isinstance(rule, dict) for rule in rules)
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else [value]
+
+
+def sanitize_singbox_rule(rule, stats, depth=0):
+    """按官方字段表清洗一条 headless rule，返回清洗后的规则或 None。
+
+    来源是远端 URL，不能直接信任：未知字段一律丢弃并计数，
+    否则会产出 sing-box 无法编译的规则集。
+    """
+    if rule.get('type') == 'logical':
+        if depth >= SINGBOX_LOGICAL_MAX_DEPTH:
+            stats['logical(嵌套过深)'] = stats.get('logical(嵌套过深)', 0) + 1
+            return None
+        sub_rules = []
+        for sub in _as_list(rule.get('rules', [])):
+            if not isinstance(sub, dict):
+                continue
+            cleaned = sanitize_singbox_rule(sub, stats, depth + 1)
+            if cleaned:
+                sub_rules.append(cleaned)
+        if not sub_rules:
+            return None
+        mode = str(rule.get('mode', 'and')).lower()
+        if mode not in ('and', 'or'):
+            mode = 'and'
+        out = {'type': 'logical', 'mode': mode, 'rules': sub_rules}
+        if rule.get('invert'):
+            out['invert'] = True
+        return out
+
+    out = {}
+    for field, value in rule.items():
+        if field == 'type':
+            continue
+
+        if field == 'invert':
+            if value:
+                out['invert'] = True
+            continue
+
+        if field in SINGBOX_BOOL_FIELDS:
+            out[field] = bool(value)
+            continue
+
+        if field in SINGBOX_OBJECT_FIELDS:
+            if isinstance(value, dict) and value:
+                out[field] = value
+            continue
+
+        if field in SINGBOX_INT_ARRAY_FIELDS:
+            ports = coerce_ports(_as_list(value), '<sing-box>', field)
+            if ports:
+                out[field] = ports
+            continue
+
+        if field in SINGBOX_CIDR_ARRAY_FIELDS:
+            cidrs = []
+            for item in _as_list(value):
+                normalized = normalize_ip_cidr(item)
+                if normalized:
+                    cidrs.append(normalized)
+                else:
+                    stats[f'{field}(无法解析)'] = stats.get(f'{field}(无法解析)', 0) + 1
+            if cidrs:
+                out[field] = cidrs
+            continue
+
+        if field in SINGBOX_MIXED_ARRAY_FIELDS:
+            items = [v for v in _as_list(value) if isinstance(v, (int, str))]
+            if items:
+                out[field] = items
+            continue
+
+        if field in SINGBOX_STRING_ARRAY_FIELDS:
+            items = [str(v).strip() for v in _as_list(value) if str(v).strip()]
+            if items:
+                out[field] = items
+            continue
+
+        # 官方字段表之外的键：丢弃并计数
+        stats[field] = stats.get(field, 0) + (len(value) if isinstance(value, list) else 1)
+
+    return out or None
+
+
+def parse_singbox_rule_set(data, url=''):
+    """把 sing-box source format 的 rules 原样取出（清洗后）。
+
+    刻意不转成 DataFrame：headless rule 有二十多个字段，
+    process_name / network_type / port_range / invert / logical 这些
+    在 (pattern, address) 的中间表示里根本没有位置，转一圈必然丢信息。
+    规则集里的多条 headless rule 本来就是 OR 关系，
+    所以直接拼接到最终产物的 rules 数组即可。
+    """
+    stats = {}
+    rules = []
+    for rule in data.get('rules', []):
+        cleaned = sanitize_singbox_rule(rule, stats)
+        if cleaned:
+            rules.append(cleaned)
+
+    if stats:
+        detail = ', '.join(f"{k}={v}" for k, v in sorted(stats.items()))
+        print(f"  sing-box 规则集中已丢弃的字段: {detail}")
+
+    version = data.get('version')
+    print(f"  sing-box 源格式: {len(rules)} 条 headless rule (源 version={version})")
+    return rules
+
+
 def read_list_from_url(url):
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
             try:
-                # 首先检查是否是hosts格式
+                # 最优先：已经是 sing-box source format 就原样直通，不走文本解析
+                if response.text.lstrip().startswith('{'):
+                    try:
+                        singbox_data = json.loads(response.text)
+                    except ValueError:
+                        singbox_data = None
+                    if is_singbox_rule_set(singbox_data):
+                        print(f"检测到 sing-box 源格式规则集: {url}")
+                        empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
+                        return empty, parse_singbox_rule_set(singbox_data, url)
+
+                # 其次检查是否是hosts格式
                 if is_hosts_format(response.text):
                     print(f"检测到hosts格式: {url}")
                     df = parse_hosts_format(response.text)
@@ -389,6 +548,12 @@ def parse_and_convert_to_dataframe(link):
                 rows = []
                 if yaml_data is None:
                     return pd.DataFrame(columns=['pattern', 'address', 'other']), []
+
+                # JSON 是合法 YAML，.txt/.yaml 后缀下也可能是 sing-box 源格式
+                if is_singbox_rule_set(yaml_data):
+                    print(f"检测到 sing-box 源格式规则集: {link}")
+                    empty = pd.DataFrame(columns=['pattern', 'address', 'other'])
+                    return empty, parse_singbox_rule_set(yaml_data, link)
                 
                 if not isinstance(yaml_data, str):
                     items = yaml_data.get('payload', [])
@@ -457,7 +622,12 @@ def sort_dict(obj):
     elif isinstance(obj, list) and all(isinstance(elem, dict) for elem in obj):
         return sorted([sort_dict(x) for x in obj], key=lambda d: sorted(d.keys())[0] if d else "")
     elif isinstance(obj, list):
-        return sorted(sort_dict(x) for x in obj)
+        items = [sort_dict(x) for x in obj]
+        try:
+            return sorted(items)
+        except TypeError:
+            # 混合类型列表无法直接比较，例如 query_type 允许 ["A", 32768]
+            return sorted(items, key=lambda v: (type(v).__name__, str(v)))
     else:
         return obj
 
@@ -480,15 +650,23 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
 
             dfs = [df for df, rules in results if df is not None and not df.empty]
 
-            # 检查是否有有效的DataFrame
-            if not dfs:
+            # sing-box 源格式的规则原样直通，不经过 DataFrame
+            passthrough_rules = []
+            for _, rules in results:
+                if rules:
+                    passthrough_rules.extend(rules)
+
+            if not dfs and not passthrough_rules:
                 print(f"未获取到有效数据: {rule_name}")
                 return None
 
-            try:
-                df = pd.concat(dfs, ignore_index=True)
-            except Exception as e:
-                print(f"合并DataFrame失败: {rule_name}, 错误: {str(e)}")
+            if dfs:
+                try:
+                    df = pd.concat(dfs, ignore_index=True)
+                except Exception as e:
+                    print(f"合并DataFrame失败: {rule_name}, 错误: {str(e)}")
+                    df = pd.DataFrame(columns=['pattern', 'address', 'other'])
+            else:
                 df = pd.DataFrame(columns=['pattern', 'address', 'other'])
                 
         # 确保df有必要的列
@@ -512,8 +690,8 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         # 删除不在字典中的pattern
         df = df[df['pattern'].isin(MAP_DICT.keys())].reset_index(drop=True)
         
-        # 如果DataFrame为空，返回None
-        if df.empty:
+        # DataFrame 为空但有直通规则时仍要继续
+        if df.empty and not passthrough_rules:
             print(f"过滤后DataFrame为空: {rule_name}")
             return None
         
@@ -558,9 +736,10 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             elif pattern == 'geoip':
                 geoip_entries.extend([address.strip() for address in addresses])
             elif pattern == 'port':
-                port_entries.extend([address.strip() for address in addresses])
+                # 官方字段表里 port / source_port 是整数数组，写成 "80" 会编译失败
+                port_entries.extend(coerce_ports(addresses, rule_name, 'port'))
             elif pattern == 'source_port':
-                source_port_entries.extend([address.strip() for address in addresses])
+                source_port_entries.extend(coerce_ports(addresses, rule_name, 'source_port'))
             elif pattern == 'source_ip_cidr':
                 for address in addresses:
                     normalized = normalize_ip_cidr(address)
@@ -624,6 +803,20 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             source_ip_cidr_entries = list(set(source_ip_cidr_entries))
             result_rules["rules"].append({'source_ip_cidr': source_ip_cidr_entries})
         
+        # sing-box 源格式的规则原样追加：
+        # 规则集里的多条 headless rule 之间是 OR 关系，拼接即合并
+        if passthrough_rules:
+            seen_rules = {json.dumps(r, sort_keys=True) for r in result_rules["rules"]}
+            for rule in passthrough_rules:
+                key = json.dumps(rule, sort_keys=True)
+                if key not in seen_rules:
+                    seen_rules.add(key)
+                    result_rules["rules"].append(rule)
+
+        if not result_rules["rules"]:
+            print(f"没有可写入的规则: {rule_name}")
+            return None
+
         # 使用自定义名称或原始文件名
         file_name = os.path.join(output_directory, f"{rule_name}.json")
         
@@ -644,6 +837,23 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
     except Exception as e:
         print(f'生成规则集出错，已跳过：{rule_name}，原因：{str(e)}')
         return None
+
+def coerce_ports(addresses, rule_name, field):
+    """端口在 sing-box 规则集里是整数数组，字符串会让 compile 失败。"""
+    ports = []
+    for address in addresses:
+        value = clean_rule_value(address)
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            print(f"  {rule_name}: 跳过无法解析的 {field}: {address!r}")
+            continue
+        if 0 <= port <= 65535:
+            ports.append(port)
+        else:
+            print(f"  {rule_name}: 跳过越界的 {field}: {port}")
+    return ports
+
 
 def determine_entry_type(entry):
     """根据 Custom.config 条目内容确定其类型。"""

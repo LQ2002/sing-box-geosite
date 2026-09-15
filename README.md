@@ -8,6 +8,34 @@
 https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock
 ```
 
+## 支持的源格式
+
+links.txt 里的链接会自动识别格式，无需额外标注：
+
+| 格式 | 说明 |
+| --- | --- |
+| Clash / Surge 规则列表 | `DOMAIN-SUFFIX,example.com` 这类写法 |
+| Clash `payload:` YAML | 常见的 ruleset yaml |
+| hosts 文件 | `0.0.0.0 example.com` |
+| 纯域名 / IP 列表 | 一行一个，或空格分隔 |
+| **sing-box 源格式** | 已经是 `{"version": N, "rules": [...]}` 的 json |
+
+sing-box 源格式的链接采用**原样直通**：不转换成中间表示，
+所以 `process_name`、`network_type`、`port_range`、`invert`、
+以及 `type: logical` 的逻辑规则都能完整保留。
+
+字段表依据 [headless rule 官方文档](https://sing-box.sagernet.org/configuration/rule-set/headless-rule/)，
+表外的未知字段会被丢弃并在日志里计数 ——
+sing-box 对未知字段是直接报错的（`json: unknown field "xxx"`），
+不过滤会让整个规则集编译失败。
+
+同一个规则名下可以混用多种格式的源，会合并成一个文件：
+
+```
+https://example.com/some-clash-rules.yaml   MyRule
+https://example.com/already-singbox.json    MyRule
+```
+
 ## 在Custom.config里添加域名/ip和规则链接名称  
 ```
 dns.wechat.com BlockHttpDNS
