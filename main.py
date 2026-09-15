@@ -1268,21 +1268,26 @@ def determine_entry_type(entry):
     # 默认为域名
     return 'domain', entry
 
-# GitHub 上传 Release 资产时会改名，实测（2026-09）保留的字符是
-#   字母 数字 . _ - + @
-# 其余一律换成 '.'：! ~ 空格 括号都会被替换，非 ASCII 直接消失。
-RULE_NAME_UNSAFE_RE = re.compile(r'[^A-Za-z0-9._+@-]+')
+# 规则名要当文件名用。这里只挡文件系统真正不接受的字符，
+# 不再按 GitHub Release 资产的字符集来卡：规则文件现在同时发到
+# rule 分支，走 raw 链接时 ! ~ 空格这些都能原样保留；
+# Release 那边由 GitHub 自行改名，CI 比对时会做同样的规整。
+RULE_NAME_UNSAFE_CHARS = '/' + chr(92) + ':*?"<>|'
+RULE_NAME_UNSAFE_RE = re.compile(
+    '[' + re.escape(RULE_NAME_UNSAFE_CHARS) + ']+|[\u0000-\u001f]+')
 
 
 def sanitize_rule_name(name):
-    """把规则名规整成既能当文件名、也能原样当 Release 资产名的形式。
+    """把规则名规整成安全的文件名。
 
-    不做这一步的话：本地生成 "Ai-Global!cn.json"，GitHub 存成
-    "Ai-Global.cn.json"，随后陈旧资产清理拿本地名去比对发现对不上，
-    就把刚上传的资产删掉了——构建还报成功，订阅却是 404。
+    只替换 Windows / POSIX 上根本没法做文件名的字符（路径分隔符、
+    : * ? " < > | 和控制字符），其余一律原样保留——
+    ! @ + ~ 空格在 git 里和 raw 链接里都能正常用。
     """
-    cleaned = RULE_NAME_UNSAFE_RE.sub('.', name).strip('.')
-    return cleaned or 'rule'
+    cleaned = RULE_NAME_UNSAFE_RE.sub('.', name).strip().strip('.')
+    if cleaned in ('', '.', '..'):
+        return 'rule'
+    return cleaned
 
 
 TAG_PLACEHOLDER = '{tag}'

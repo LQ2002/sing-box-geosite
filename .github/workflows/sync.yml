@@ -7,12 +7,13 @@ on:
   schedule:
     - cron: '0 4 * * *'
 
-# 只需要写 Releases 和 tag，不再往仓库推提交
+# 需要写 Releases、tag 和 rule 分支，但不再往 main 推提交
 permissions:
   contents: write
 
 env:
   RELEASE_TAG: latest
+  RULE_BRANCH: rule
 
 jobs:
   build:
@@ -51,7 +52,7 @@ jobs:
     - name: Run script
       env:
         # 主程序把"本次应该产出哪些规则集"的清单写到这里，
-        # 下一步据此判断要不要清理陈旧资产
+        # 下一步据此判断本次生成是否完整
         BUILD_REPORT: ${{ runner.temp }}/build-report.json
       run: python ../main.py
       working-directory: ./rule/
@@ -75,13 +76,59 @@ jobs:
           exit 1
         fi
 
-        # 有上游挂掉时只上传、不做陈旧资产清理，避免把订阅中的 srs 删掉
+        # 生成不完整时只做"只增不删"的发布，避免把订阅里还在用的文件抹掉
         if [ "$actual" -lt "$expected" ]; then
-          echo "::warning::只生成了 $actual/$expected 个规则，疑似上游源不可用；本次跳过陈旧资产清理"
-          echo "PRUNE_STALE=false" >> "$GITHUB_ENV"
+          echo "::warning::只生成了 $actual/$expected 个规则，疑似上游源不可用"
+          echo "COMPLETE=false" >> "$GITHUB_ENV"
         else
-          echo "PRUNE_STALE=true" >> "$GITHUB_ENV"
+          echo "COMPLETE=true" >> "$GITHUB_ENV"
         fi
+
+    - name: Publish to rule branch
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -Eeuo pipefail
+
+        # rule 分支每次都是全量强制覆盖，只有一个提交。
+        # 正因为是覆盖，本次生成不完整时绝不能推：
+        # 缺的文件会直接从分支上消失，订阅立刻 404。
+        if [ "${COMPLETE:-false}" != "true" ]; then
+          echo "::warning::本次生成不完整，跳过 $RULE_BRANCH 分支发布，保留上一版快照"
+          exit 0
+        fi
+
+        stamp=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S')
+        work="$RUNNER_TEMP/rulebranch"
+        rm -rf "$work"
+        mkdir -p "$work"
+        cp -a ./rule/. "$work/"
+
+        {
+          echo "# 规则集产物"
+          echo
+          echo "本分支由 CI 自动生成并**强制覆盖**，永远只有一个提交，请勿在此提交内容。"
+          echo "规则来源和生成脚本在 main 分支。"
+          echo
+          echo '```'
+          echo "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$RULE_BRANCH/<名称>.srs"
+          echo '```'
+          echo
+          echo "最后更新: $stamp (北京时间 UTC+8)"
+          echo
+          echo "来源提交: $GITHUB_SHA"
+        } > "$work/README.md"
+
+        cd "$work"
+        git init -q
+        git config user.email "action@github.com"
+        git config user.name "GitHub Action"
+        git add -A
+        git commit -q -m "规则集 $stamp (北京时间)"
+        git push -f -q \
+          "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+          "HEAD:refs/heads/$RULE_BRANCH"
+        echo "已强制覆盖分支 $RULE_BRANCH（$(ls -1 | wc -l) 个文件）"
 
     - name: Publish to rolling release
       env:
@@ -103,7 +150,7 @@ jobs:
 
         # 3. 再删除本次没有生成的陈旧资产（links.txt 里已移除的规则）
         #    仅在本次生成完整时执行，否则上游临时故障会误删订阅中的资产
-        if [ "${PRUNE_STALE:-false}" = "true" ]; then
+        if [ "${COMPLETE:-false}" = "true" ]; then
           # 本地文件名要按 GitHub 的资产命名规则规整后再比对：上传时
           # [A-Za-z0-9._+@-] 之外的字符会被换成 '.'，拿本地原名直接比会对不上，
           # 于是把刚传上去的资产当成陈旧资产删掉。

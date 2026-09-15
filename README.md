@@ -68,33 +68,25 @@ https://example.com/extra-wechat.list  WeChat     # 会合并进 WeChat
 
 ## 规则名的可用字符
 
-规则名会直接当 Release 资产名。GitHub 在上传时会自己改名，
-实测（2026-09）保留的字符只有：
+规则名直接当文件名，几乎不受限制 —— `!` `@` `+` `~` 空格、中文都能用。
+脚本只替换文件系统真正不接受的字符：路径分隔符和 `: * ? " < > |` 以及控制字符。
 
 ```
-字母  数字  .  _  -  +  @
+Ai-Global!cn   ->  Ai-Global!cn      原样保留
+a/b            ->  a.b               路径分隔符不行
+a:b            ->  a.b
 ```
 
-其余一律被换成 `.`，非 ASCII 直接消失：
+不过 **Release 资产那一路会被 GitHub 改名**。实测（2026-09）它只保留
+`字母 数字 . _ - + @`，其余换成 `.`，非 ASCII 直接消失：
 
-| 写法 | GitHub 存成 |
-| --- | --- |
-| `Ai-Global!cn.json` | `Ai-Global.cn.json` |
-| `Ai-Global@cn.json` | `Ai-Global@cn.json` |
-| `Ai-Global+cn.json` | `Ai-Global+cn.json` |
-| `Ai Global.json` | `Ai.Global.json` |
-| `rule(x).json` | `rule.x.json` |
-| `中文.json` | `.json` |
+| 文件名 | rule 分支（raw） | Release 资产 |
+| --- | --- | --- |
+| `Ai-Global!cn.srs` | `Ai-Global!cn.srs` | `Ai-Global.cn.srs` |
+| `Ai Global.srs` | `Ai Global.srs` | `Ai.Global.srs` |
+| `中文.srs` | `中文.srs` | `.srs` |
 
-所以脚本会先把规则名规整成同一套字符集，并在日志里提示：
-
-```
-规则名 'Ai-Global!cn' 含 GitHub 资产名不支持的字符，已规整为 'Ai-Global.cn'
-```
-
-不做这一步的后果：本地生成 `Ai-Global!cn.json`，GitHub 存成
-`Ai-Global.cn.json`，随后陈旧资产清理拿本地名去比对发现对不上，
-就把刚上传的资产删掉——构建还报成功，订阅却是 404。
+所以想用特殊字符的名字，订阅 rule 分支的 raw 链接。
 
 ## 支持的源格式
 
@@ -149,33 +141,49 @@ dns.wechat.com BlockHttpDNS
 
 ## 订阅链接
 
-规则集不再提交到仓库，由 CI 发布到 `latest` 这个滚动 Release，**每次构建覆盖旧文件**，仓库体积恒定。
+规则集不进 main 分支。CI 会把产物同时发到两个地方，**内容完全一样**，挑一个用即可。
+
+### rule 分支（推荐，文件名不受限）
 
 ```
-https://github.com/LQ2002/sing-box-geosite/releases/latest/download/<名称>.srs
-https://github.com/LQ2002/sing-box-geosite/releases/latest/download/<名称>.json
+https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/<名称>.srs
+https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/<名称>.json
 ```
 
 例如：
 
 ```
-https://github.com/LQ2002/sing-box-geosite/releases/latest/download/Ads_SKK.srs
-https://github.com/LQ2002/sing-box-geosite/releases/latest/download/CN_Direct.srs
+https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/Ai-Global!cn.srs
+https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/CN_Direct.srs
 ```
 
-在 sing-box 配置里：
+`rule` 是一个孤儿分支，每次构建强制覆盖，**永远只有一个提交**，
+所以仓库不会因为累积历史而膨胀。不要往这个分支提交东西，下次构建就没了。
+
+### GitHub Releases
+
+```
+https://github.com/LQ2002/sing-box-geosite/releases/latest/download/<名称>.srs
+```
+
+文件名会被 GitHub 规整（见上一节），但空间占用是确定性的零增长，
+不依赖 GitHub 回收不可达对象。
+
+### 在 sing-box 配置里
 
 ```json
 {
   "type": "remote",
-  "tag": "Ads_SKK",
+  "tag": "Ai-Global!cn",
   "format": "binary",
-  "url": "https://github.com/LQ2002/sing-box-geosite/releases/latest/download/Ads_SKK.srs",
+  "url": "https://raw.githubusercontent.com/LQ2002/sing-box-geosite/rule/Ai-Global!cn.srs",
   "download_detour": "代理"
 }
 ```
 
-> 旧的 `raw.githubusercontent.com/.../main/rule/xxx.srs` 链接已失效，请改用上方地址。
+`tag` 是你在路由规则里引用的名字，和文件名无关，想叫什么叫什么。
+
+> 旧的 `raw.githubusercontent.com/.../main/rule/xxx.srs` 链接已失效。
 
 ### 版本要求
 
