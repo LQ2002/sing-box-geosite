@@ -29,6 +29,31 @@ https://example.com/{tag}/list-{tag}.txt    a,b
   -> https://example.com/b/list-b.txt   规则集 b
 ```
 
+### 后缀不一样怎么办
+
+格式是按**内容**嵌探的，不看后缀，所以 `{tag}.json`、`{tag}.list`、
+`{tag}.yaml`、甚至模板里不写后缀都能用：
+
+```
+https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/{tag}/{tag}.yaml    Telegram,YouTube
+https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/refs/heads/master/Lists/{tag}                      Microsoft,Tracking
+```
+
+如果同一行里各个文件的后缀不一样，把模板写到 `{tag}` 为止，
+后缀跟在标签上，规则集名会自动剥掉它：
+
+```
+https://example.com/rule/{tag}    360.json,115.list,google.hosts,plain
+  -> rule/360.json     规则集 360      (sing-box 源格式)
+  -> rule/115.list     规则集 115      (Clash/Surge 规则行)
+  -> rule/google.hosts 规则集 google   (hosts 文件)
+  -> rule/plain        规则集 plain    (纯域名列表)
+```
+
+会被剥掉的后缀是固定的一组：`.json` `.list` `.txt` `.yaml` `.yml`
+`.conf` `.srs` `.hosts` `.rules`（不区分大小写）。不在表里的不动，
+所以 `v2.ray` 这种本身带点的标签不会被误伤。
+
 几条约束：
 
 - 设了多个标签却没有 `{tag}` 占位符 → 该行跳过并提示

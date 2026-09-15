@@ -1192,6 +1192,28 @@ TAG_PLACEHOLDER = '{tag}'
 # 标签同时用作输出文件名，必须是安全的文件名片段
 TAG_RE = re.compile(r'^[A-Za-z0-9_.@+-]+$')
 
+# 标签自带后缀时，从规则集名里剥掉。只认这几个规则文件常见后缀，
+# 这样 v2.ray 这种本身带点的标签不会被误伤。
+TAG_STRIPPABLE_SUFFIXES = ('.json', '.list', '.txt', '.yaml', '.yml',
+                           '.conf', '.srs', '.hosts', '.rules')
+
+
+def tag_to_rule_name(tag):
+    """由标签推导规则集名：剥掉已知的规则文件后缀。
+
+    这样同一行里可以混用后缀，url 模板只写到 {tag} 为止：
+
+        https://example.com/rule/{tag}    360.json,115.list,google
+        -> rule/360.json  规则集 360
+        -> rule/115.list  规则集 115
+        -> rule/google    规则集 google
+    """
+    lowered = tag.lower()
+    for suffix in TAG_STRIPPABLE_SUFFIXES:
+        if lowered.endswith(suffix) and len(tag) > len(suffix):
+            return tag[:-len(suffix)]
+    return tag
+
 
 def expand_tags(url, name):
     """按 sing-box 的多 tag 语义展开一行 links.txt。
@@ -1230,7 +1252,8 @@ def expand_tags(url, name):
         if tag in seen:
             continue
         seen.add(tag)
-        expanded.append((url.replace(TAG_PLACEHOLDER, tag), tag))
+        # url 里用标签原文（含后缀），规则集名剥掉后缀
+        expanded.append((url.replace(TAG_PLACEHOLDER, tag), tag_to_rule_name(tag)))
 
     if expanded:
         print(f"{TAG_PLACEHOLDER} 展开出 {len(expanded)} 个规则集: "
