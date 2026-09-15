@@ -93,9 +93,12 @@ jobs:
         done < /tmp/stale.txt
 
         # 4. 刷新发布说明里的时间戳
-        gh release edit "$RELEASE_TAG" \
-          --notes "自动生成的 sing-box 规则集，每次构建覆盖。
-
-最后更新: $(date -u '+%Y-%m-%d %H:%M:%S') UTC
-来源提交: $GITHUB_SHA" \
-          --latest
+        #    注意：下面每一行都必须保持缩进，
+        #    顶到第 0 列会提前终止 run: | 的块标量
+        {
+          echo "自动生成的 sing-box 规则集，每次构建覆盖。"
+          echo
+          echo "最后更新: $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+          echo "来源提交: $GITHUB_SHA"
+        } > "$RUNNER_TEMP/notes.md"
+        gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/notes.md" --latest
