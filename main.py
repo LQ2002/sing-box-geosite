@@ -1046,20 +1046,6 @@ def sort_dict(obj):
     else:
         return obj
 
-def is_pure_ip_rule(rule):
-    """判断一条 headless rule 是否只按 IP 匹配。
-
-    拆分 -ip 时只能整条移动：一条 default rule 里的多个字段是 AND 关系，
-    把 ip_cidr 单独抽出来会让剩下的部分匹配得更宽。
-    所以只有字段全是 IP 类的规则才移走，域名和 IP 混在同一条里的留在主文件。
-    logical 规则同理，整条留在主文件。
-    """
-    if rule.get('type') == 'logical':
-        return False
-    fields = set(rule) - {'invert'}
-    return bool(fields) and fields <= SINGBOX_CIDR_ARRAY_FIELDS
-
-
 def write_rule_set(name, rules, version, output_directory):
     """写出一个规则集的 json 并编译成 srs，返回 json 路径；失败返回 None。"""
     file_name = os.path.join(output_directory, f"{name}.json")
@@ -1179,8 +1165,9 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         ip_cidr_entries = []
         domain_keyword_entries = []
         domain_regex_entries = []
-        # 这个规则集是否用到了 ASN，决定要不要拆出 -ip 文件
-        has_asn = False
+        # ASN 展开出来的网段单独存：它们会被拆到 <名称>-ip，
+        # 而源里手写的 IP-CIDR 留在主文件
+        asn_cidr_entries = []
         process_name_entries = []
         process_path_entries = []
         network_entries = []
@@ -1215,9 +1202,8 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             elif pattern == 'domain_regex':
                 domain_regex_entries.extend([address.strip() for address in addresses])
             elif pattern == 'ip_asn':
-                has_asn = True
                 for address in addresses:
-                    ip_cidr_entries.extend(expand_asn(address))
+                    asn_cidr_entries.extend(expand_asn(address))
             elif pattern == 'process_name':
                 process_name_entries.extend([address.strip() for address in addresses])
             elif pattern == 'process_path':
@@ -1254,8 +1240,7 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                 elif entry_type == 'domain':
                     domain_entries.append(entry_value)
                 elif entry_type == 'ip_asn':
-                    has_asn = True
-                    ip_cidr_entries.extend(expand_asn(entry_value))
+                    asn_cidr_entries.extend(expand_asn(entry_value))
                 elif entry_type == 'ip_cidr':
                     ip_cidr_entries.append(entry_value)
                 elif entry_type == 'domain_keyword':
@@ -1266,70 +1251,75 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                         domain_keyword_entries.append(kw_value)
         
         # 添加去重后的条目到规则中。
-        # ip_cidr / source_ip_cidr 先单独放着：这个规则集若用到了 ASN，
-        # 它们会被拆到 <名称>-ip 里，见下面的 has_asn 分支。
-        domain_rules = []
-        ip_rules = []
+        # 只有 ASN 展开出来的网段会被拆到 <名称>-ip，
+        # 源里手写的 IP-CIDR / IP-CIDR6 和其余规则一样留在主文件。
+        main_rules = []
+        asn_rules = []
 
         if domain_entries:
-            domain_rules.append({'domain': list(set(domain_entries))})
+            main_rules.append({'domain': list(set(domain_entries))})
 
         if domain_suffix_entries:
-            domain_rules.append({'domain_suffix': list(set(domain_suffix_entries))})
+            main_rules.append({'domain_suffix': list(set(domain_suffix_entries))})
 
         if ip_cidr_entries:
-            ip_rules.append({'ip_cidr': list(set(ip_cidr_entries))})
+            main_rules.append({'ip_cidr': list(set(ip_cidr_entries))})
 
         if domain_keyword_entries:
-            domain_rules.append({'domain_keyword': list(set(domain_keyword_entries))})
+            main_rules.append({'domain_keyword': list(set(domain_keyword_entries))})
 
         if domain_regex_entries:
-            domain_rules.append({'domain_regex': list(set(domain_regex_entries))})
+            main_rules.append({'domain_regex': list(set(domain_regex_entries))})
 
         if process_name_entries:
-            domain_rules.append({'process_name': list(set(process_name_entries))})
+            main_rules.append({'process_name': list(set(process_name_entries))})
 
         if process_path_entries:
-            domain_rules.append({'process_path': list(set(process_path_entries))})
+            main_rules.append({'process_path': list(set(process_path_entries))})
 
         if network_entries:
-            domain_rules.append({'network': list(set(network_entries))})
+            main_rules.append({'network': list(set(network_entries))})
 
         if port_entries:
-            domain_rules.append({'port': list(set(port_entries))})
+            main_rules.append({'port': list(set(port_entries))})
 
         if source_port_entries:
-            domain_rules.append({'source_port': list(set(source_port_entries))})
+            main_rules.append({'source_port': list(set(source_port_entries))})
 
         if source_ip_cidr_entries:
-            ip_rules.append({'source_ip_cidr': list(set(source_ip_cidr_entries))})
+            main_rules.append({'source_ip_cidr': list(set(source_ip_cidr_entries))})
 
         # sing-box 源格式的规则原样追加：
         # 规则集里的多条 headless rule 之间是 OR 关系，拼接即合并
         if passthrough_rules:
-            seen_rules = {json.dumps(r, sort_keys=True) for r in domain_rules + ip_rules}
+            seen_rules = {json.dumps(r, sort_keys=True) for r in main_rules}
             for rule in passthrough_rules:
                 key = json.dumps(rule, sort_keys=True)
-                if key in seen_rules:
-                    continue
-                seen_rules.add(key)
-                if is_pure_ip_rule(rule):
-                    ip_rules.append(rule)
-                else:
-                    domain_rules.append(rule)
+                if key not in seen_rules:
+                    seen_rules.add(key)
+                    main_rules.append(rule)
 
-        if not domain_rules and not ip_rules:
+        # ASN 展开的网段里，和手写 IP-CIDR 重复的就不必再放一份
+        if asn_cidr_entries:
+            written_cidrs = set(ip_cidr_entries)
+            unique = sorted(set(asn_cidr_entries) - written_cidrs)
+            if unique:
+                asn_rules.append({'ip_cidr': unique})
+
+        if not main_rules and not asn_rules:
             print(f"没有可写入的规则: {rule_name}")
             return None
 
-        # 用到 ASN 时才拆分。ASN 动辄展开上千条网段，和域名规则混在一个
-        # 规则集里既臃肿、又没法单独给 DNS 规则用，所以单独出一个 -ip 文件。
-        # 没有 ASN 的规则集保持原样，避免凭空多出一堆文件。
-        if has_asn and ip_rules:
-            documents = [(rule_name, domain_rules), (f"{rule_name}-ip", ip_rules)]
-            print(f"  {rule_name}: 含 ASN，IP 类规则拆分到 {rule_name}-ip")
+        # ASN 动辄展开上千条网段，和域名规则混在一起既臃肿、
+        # 又没法单独给 DNS 规则用，所以单独出一个 -ip 文件。
+        # 只拆 ASN 展开的部分：手写的 IP 规则是源作者明确写下的，
+        # 留在主文件里，订阅方不必为了它们多加一个规则集。
+        if asn_rules:
+            documents = [(rule_name, main_rules), (f"{rule_name}-ip", asn_rules)]
+            count = sum(len(r['ip_cidr']) for r in asn_rules)
+            print(f"  {rule_name}: ASN 展开的 {count} 条网段拆分到 {rule_name}-ip")
         else:
-            documents = [(rule_name, domain_rules + ip_rules)]
+            documents = [(rule_name, main_rules)]
 
         written = []
         for name, rules in documents:

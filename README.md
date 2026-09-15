@@ -126,24 +126,28 @@ AND,((IP-ASN,399358),(DOMAIN-SUFFIX,anthropic.com)),PROXY
 - **查不到就让整个规则集失败**。ASN 往往代表一整家服务商的网段，
   静默少掉它会让规则悄悄失效，不如让 CI 跳过这次发布、保留上一版完整快照
 
-#### 用到 ASN 的规则集会拆成两个文件
+#### ASN 展开的网段会单独出一个 -ip 文件
 
-ASN 动辄展开上千条网段，和域名规则混在一个规则集里既臃肿、又没法单独给
-DNS 规则用。所以**只要规则集里用到了 ASN**，它的 IP 类规则（`ip_cidr`、
-`source_ip_cidr`，含手写的 `IP-CIDR` / `IP-CIDR6`）会全部拆到 `<名称>-ip`：
+ASN 动辄展开上千条网段，混进主规则集会把它撑得很大。所以
+**ASN 展开出来的那批网段**单独写到 `<名称>-ip`：
 
 ```
-Ai-Global!cn.srs      domain / domain_suffix / domain_keyword / process_name ...
-Ai-Global!cn-ip.srs   ip_cidr（ASN 展开的 + 源里手写的）
+IP-ASN,399358,no-resolve
+IP-CIDR,160.79.104.0/21,no-resolve
+DOMAIN-SUFFIX,anthropic.com,PROXY
+PROCESS-NAME,claude.exe,PROXY
+
+  -> MyRule.json      {domain_suffix: 1, process_name: 1, ip_cidr: 1}
+  -> MyRule-ip.json   {ip_cidr: 3}    仅 ASN 展开的
 ```
 
-没用到 ASN 的规则集保持原样，不会凭空多出文件。
+两条边界：
 
-订阅时两个都要加：域名集给 DNS 规则或 route 的域名匹配用，IP 集给 route
-的 IP 匹配用。
+- **只拆 ASN 展开的**。源里手写的 `IP-CIDR` / `IP-CIDR6` 是作者明确写下的，
+  留在主文件，订阅方不必为它们多加一个规则集
+- **没用到 ASN 就完全不拆**，哪怕源里全是 IP 规则
 
-有一类规则不会被拆走：同一条 headless rule 里既有域名字段又有 IP 字段时
-（字段之间是 AND 关系），拆开会让剩下的部分匹配得更宽，所以整条留在主文件。
+和手写 IP-CIDR 重复的 ASN 网段不会重复写一份。
 
 ### 复合规则
 
