@@ -8,6 +8,39 @@
 https://raw.githubusercontent.com/ignaciocastro/a-dove-is-dumb/refs/heads/main/clash.yaml AdobeBlock
 ```
 
+## {tag} 占位符
+
+对齐 sing-box [rule-set 的多 tag 语义](https://sing-box.sagernet.org/zh/configuration/rule-set/)：
+第二列写成逗号分隔的标签，url 里的 `{tag}` 会被替换成每个标签，
+一行展开成多个规则集。标签同时就是各自的规则集名。
+
+```
+https://example.com/rule/{tag}.json    360,115,google
+```
+
+会分别拉取 `360.json`、`115.json`、`google.json`，
+生成 `360.srs`、`115.srs`、`google.srs` 三个规则集。
+
+`{tag}` 可以在 url 里出现多次，会全部替换：
+
+```
+https://example.com/{tag}/list-{tag}.txt    a,b
+  -> https://example.com/a/list-a.txt   规则集 a
+  -> https://example.com/b/list-b.txt   规则集 b
+```
+
+几条约束：
+
+- 设了多个标签却没有 `{tag}` 占位符 → 该行跳过并提示
+- 有 `{tag}` 却没给标签 → 该行跳过并提示
+- 标签会当文件名用，只允许字母、数字和 `_ . @ + -`，其余跳过
+- 展开出的名字和普通行一样参与合并，也一样吃 Custom.config
+
+```
+https://example.com/rule/{tag}.json    Alipay,WeChat
+https://example.com/extra-wechat.list  WeChat     # 会合并进 WeChat
+```
+
 ## 支持的源格式
 
 links.txt 里的链接会自动识别格式，无需额外标注：

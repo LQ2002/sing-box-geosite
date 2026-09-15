@@ -1187,6 +1187,57 @@ def determine_entry_type(entry):
     # 默认为域名
     return 'domain', entry
 
+TAG_PLACEHOLDER = '{tag}'
+
+# 标签同时用作输出文件名，必须是安全的文件名片段
+TAG_RE = re.compile(r'^[A-Za-z0-9_.@+-]+$')
+
+
+def expand_tags(url, name):
+    """按 sing-box 的多 tag 语义展开一行 links.txt。
+
+    参照 https://sing-box.sagernet.org/configuration/rule-set/
+    tag 接受一组标签，用于一次定义多个共享其他选项的规则集；
+    url 里的 {tag} 占位符会被替换成每个标签，设置多个标签时必填。
+
+    这里沿用同一套规则：标签既是 {tag} 的替换值，也是各自规则集的名字。
+
+        https://example.com/rule/{tag}.json    360,115,google
+        -> 360.json / 115.json / google.json 三个规则集
+
+    返回 [(展开后的链接, 规则名), ...]。
+    """
+    has_placeholder = TAG_PLACEHOLDER in url
+    tags = [t.strip() for t in name.split(',')] if name else []
+    tags = [t for t in tags if t]
+
+    if not has_placeholder:
+        if len(tags) > 1:
+            print(f"跳过：设置了多个标签但 url 里没有 {TAG_PLACEHOLDER} 占位符: {url}")
+            return []
+        return [(url, name)]
+
+    if not tags:
+        print(f"跳过：url 里有 {TAG_PLACEHOLDER} 占位符但没有给出标签: {url}")
+        return []
+
+    expanded = []
+    seen = set()
+    for tag in tags:
+        if not TAG_RE.match(tag):
+            print(f"跳过非法标签 {tag!r}（只允许字母、数字和 _ . @ + -）: {url}")
+            continue
+        if tag in seen:
+            continue
+        seen.add(tag)
+        expanded.append((url.replace(TAG_PLACEHOLDER, tag), tag))
+
+    if expanded:
+        print(f"{TAG_PLACEHOLDER} 展开出 {len(expanded)} 个规则集: "
+              f"{', '.join(t for _, t in expanded)}")
+    return expanded
+
+
 def read_links_file():
     """读取 links.txt，返回 [(链接, 规则名或 None), ...]。
 
@@ -1218,7 +1269,9 @@ def read_links_file():
         return []
     
     try:
-        with open(file_path, 'r', encoding='utf-8') as links_file:
+        # utf-8-sig：Windows 上用记事本/PowerShell 保存会带 BOM，
+        # 不剥掉的话第一行的 URL 前面会多一个不可见字符，请求直接失败
+        with open(file_path, 'r', encoding='utf-8-sig') as links_file:
             link_lines = links_file.read().splitlines()
             
         print(f"成功读取文件: {file_path}")
@@ -1228,10 +1281,9 @@ def read_links_file():
             if not line or line.startswith("#"):
                 continue
             parts = line.split(maxsplit=1)
-            if len(parts) == 2:
-                entries.append((parts[0], parts[1].strip()))
-            else:
-                entries.append((parts[0], None))
+            url = parts[0]
+            name = parts[1].strip() if len(parts) == 2 else None
+            entries.extend(expand_tags(url, name))
 
         return entries
     except Exception as e:
@@ -1264,7 +1316,7 @@ def read_custom_config():
         return {}
     
     try:
-        with open(file_path, 'r', encoding='utf-8') as config_file:
+        with open(file_path, 'r', encoding='utf-8-sig') as config_file:
             config_lines = config_file.read().splitlines()
             
         print(f"成功读取文件: {file_path}")
