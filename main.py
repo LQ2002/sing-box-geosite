@@ -1240,7 +1240,10 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
                 elif entry_type == 'domain':
                     domain_entries.append(entry_value)
                 elif entry_type == 'ip_asn':
-                    asn_cidr_entries.extend(expand_asn(entry_value))
+                    # 并进主文件而不是拆出去：Custom.config 是手动往某个
+                    # 规则集里追加内容，不该因此凭空多一个订阅文件。
+                    # 只有源里自带的 IP-ASN 才触发拆分。
+                    ip_cidr_entries.extend(expand_asn(entry_value))
                 elif entry_type == 'ip_cidr':
                     ip_cidr_entries.append(entry_value)
                 elif entry_type == 'domain_keyword':

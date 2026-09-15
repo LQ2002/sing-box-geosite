@@ -73,6 +73,10 @@ AS399358        MyRule
 IP-ASN,399358   MyRule
 ```
 
+这里写的 ASN **不会**触发下面说的 `-ip` 拆分，展开出来的网段直接并进
+主文件 —— Custom.config 是手动往某个规则集里追加内容，不该因此凭空
+多一个订阅文件。只有源里自带的 `IP-ASN` 才拆。
+
 ---
 
 ## 支持的源格式
@@ -141,11 +145,12 @@ PROCESS-NAME,claude.exe,PROXY
   -> MyRule-ip.json   {ip_cidr: 3}    仅 ASN 展开的
 ```
 
-两条边界：
+三条边界：
 
 - **只拆 ASN 展开的**。源里手写的 `IP-CIDR` / `IP-CIDR6` 是作者明确写下的，
   留在主文件，订阅方不必为它们多加一个规则集
 - **没用到 ASN 就完全不拆**，哪怕源里全是 IP 规则
+- **只认源里的 ASN**。Custom.config 里写的 ASN 并进主文件，不触发拆分
 
 和手写 IP-CIDR 重复的 ASN 网段不会重复写一份。
 
