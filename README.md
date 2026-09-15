@@ -59,6 +59,19 @@ https://example.com/some-clash-rules.yaml   MyRule
 https://example.com/already-singbox.json    MyRule
 ```
 
+名称后面可以跟开关，每行独立生效：
+
+| 开关 | 作用 |
+| --- | --- |
+| `--no-asn` | 跳过这个源里的 `IP-ASN` 规则，不展开、也不产生 `-ip` 文件 |
+| `--asn` | 展开 ASN（默认行为，写不写都一样） |
+
+```
+https://example.com/rules.yaml    MyRule    --no-asn
+```
+
+开关一律以 `--` 开头，从行尾往前摘，所以含空格的规则名不受影响。
+
 规则集名直接当文件名，`!` `@` `+` `~` 中文都能用，只有路径分隔符和
 `: * ? " < > |` 会被替换成 `.`。
 
@@ -153,6 +166,17 @@ PROCESS-NAME,claude.exe,PROXY
 - **只认源里的 ASN**。Custom.config 里写的 ASN 并进主文件，不触发拆分
 
 和手写 IP-CIDR 重复的 ASN 网段不会重复写一份。
+
+不想要某个源的 ASN，在 links.txt 那行加 `--no-asn`：
+
+```
+https://example.com/rules.yaml    MyRule    --no-asn
+  -> 按 --no-asn 跳过 3 条 IP-ASN 规则
+  -> 只产出 MyRule，没有 MyRule-ip
+```
+
+一个 ASN 可能是整家云厂商的网段（例如 AS14061 DigitalOcean 有 889 条），
+把无关服务一并圈进去，这个开关就是给这种情况用的。
 
 ### 复合规则
 

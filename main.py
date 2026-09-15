@@ -308,13 +308,13 @@ def split_top_level(text):
     return [p for p in parts if p]
 
 
-def parse_surge_logical_component(component):
+def parse_surge_logical_component(component, allow_asn=True):
     """把 Surge/Clash 的一个复合规则分量转成 sing-box headless rule。"""
-    rule, _, _ = _parse_surge_logical_component(component)
+    rule, _, _ = _parse_surge_logical_component(component, allow_asn)
     return rule
 
 
-def _parse_surge_logical_component(component):
+def _parse_surge_logical_component(component, allow_asn=True):
     """返回 (规则或 None, narrowed, widened)，方向定义见 _sanitize_singbox_rule。
 
     支持嵌套，例如 AND,((OR,((DOMAIN,a.com),(DOMAIN,b.com))),(DEST-PORT,443)),REJECT
@@ -342,7 +342,7 @@ def _parse_surge_logical_component(component):
         narrowed = False
         widened = False
         for part in split_top_level(group):
-            parsed, part_narrowed, part_widened = _parse_surge_logical_component(part)
+            parsed, part_narrowed, part_widened = _parse_surge_logical_component(part, allow_asn)
             if parsed is None:
                 child_dropped = True
                 continue
@@ -381,6 +381,9 @@ def _parse_surge_logical_component(component):
 
     # ASN 没有对应字段，展开成 ip_cidr
     if field == 'ip_asn':
+        if not allow_asn:
+            # 该源关了 ASN 转换，这个分量无法表达，按不支持处理
+            return None, False, False
         prefixes = expand_asn(rest)
         return {'ip_cidr': prefixes}, False, False
 
@@ -395,7 +398,7 @@ def _parse_surge_logical_component(component):
     return {field: [value]}, False, False
 
 
-def extract_surge_logical_rules(content, stats=None):
+def extract_surge_logical_rules(content, stats=None, allow_asn=True):
     """扫描文本里的 AND / OR / NOT 复合规则。
 
     必须在进 DataFrame 之前单独扫一遍：这些行字段数不定，
@@ -410,7 +413,7 @@ def extract_surge_logical_rules(content, stats=None):
             continue
         if line.split(',', 1)[0].strip().upper() not in SURGE_LOGICAL_KEYWORDS:
             continue
-        parsed = parse_surge_logical_component(line)
+        parsed = parse_surge_logical_component(line, allow_asn)
         if not parsed:
             continue
         cleaned = sanitize_singbox_rule(parsed, stats)
@@ -750,9 +753,10 @@ def parse_rule_line(line):
     return pattern, clean_rule_value(rest)
 
 
-def parse_rule_lines(content):
+def parse_rule_lines(content, allow_asn=True):
     """按行解析 Clash/Surge 规则文本。"""
     rows = []
+    skipped_asn = 0
     for line in content.splitlines():
         parsed = parse_rule_line(line)
         if not parsed:
@@ -762,11 +766,16 @@ def parse_rule_lines(content):
             continue
         if pattern.upper() in SURGE_LOGICAL_KEYWORDS:
             continue  # 复合规则单独扫，见 extract_surge_logical_rules
+        if not allow_asn and pattern.upper() == 'IP-ASN':
+            skipped_asn += 1
+            continue
         rows.append({'pattern': pattern, 'address': address, 'other': None})
+    if skipped_asn:
+        print(f"  按 --no-asn 跳过 {skipped_asn} 条 IP-ASN 规则")
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
 
 
-def try_parse_clash_payload(content, url=''):
+def try_parse_clash_payload(content, url='', allow_asn=True):
     """识别并解析 Clash 的 payload: 结构。
 
     按内容判断而不是看 URL 后缀：.yml、带查询串的 .yaml?raw=1
@@ -794,6 +803,7 @@ def try_parse_clash_payload(content, url=''):
     rows = []
     logical_rules = []
     stats = {}
+    skipped_asn = 0
 
     for item in items:
         item = str(item).strip().strip("'\"")
@@ -802,10 +812,13 @@ def try_parse_clash_payload(content, url=''):
 
         head = item.split(',', 1)[0].strip().upper()
         if head in SURGE_LOGICAL_KEYWORDS:
-            parsed = parse_surge_logical_component(item)
+            parsed = parse_surge_logical_component(item, allow_asn)
             cleaned = sanitize_singbox_rule(parsed, stats) if parsed else None
             if cleaned:
                 logical_rules.append(cleaned)
+            continue
+        if not allow_asn and head == 'IP-ASN':
+            skipped_asn += 1
             continue
 
         if ',' not in item:
@@ -829,13 +842,15 @@ def try_parse_clash_payload(content, url=''):
         if pattern and address:
             rows.append({'pattern': pattern, 'address': address, 'other': None})
 
+    if skipped_asn:
+        print(f"  按 --no-asn 跳过 {skipped_asn} 条 IP-ASN 规则")
     if logical_rules:
         print(f"  解析出 {len(logical_rules)} 条 AND/OR/NOT 复合规则")
 
     return pd.DataFrame(rows, columns=['pattern', 'address', 'other']), logical_rules
 
 
-def read_list_from_url(url):
+def read_list_from_url(url, options=None):
     """抓取并解析一个规则源。
 
     失败时返回 (None, []) —— None 表示"这个源没取到"，
@@ -843,6 +858,7 @@ def read_list_from_url(url):
     一个源挂掉会被当成空集静默跳过，发布出不完整的规则集。
     """
     headers = {'User-Agent': 'Mozilla/5.0'}
+    allow_asn = (options or {}).get('asn', True)
     try:
         # 必须给超时：上游挂起时没有超时会把整个 job 拖到 GitHub 的 6 小时上限
         response = requests.get(url, headers=headers, timeout=120)
@@ -884,7 +900,7 @@ def read_list_from_url(url):
                 return empty, parse_singbox_rule_set(singbox_data, url)
 
             # Clash 的 payload: 结构按内容识别，不看 URL 后缀
-            payload_df, payload_rules = try_parse_clash_payload(response.text, url)
+            payload_df, payload_rules = try_parse_clash_payload(response.text, url, allow_asn)
             if payload_df is not None:
                 return payload_df, payload_rules
 
@@ -899,8 +915,8 @@ def read_list_from_url(url):
                 return parse_plain_domain_list(response.text), []
 
             # Clash / Surge 规则行
-            rules = extract_surge_logical_rules(response.text)
-            return parse_rule_lines(response.text), rules
+            rules = extract_surge_logical_rules(response.text, allow_asn=allow_asn)
+            return parse_rule_lines(response.text, allow_asn), rules
         except Exception as e:
             print(f"解析URL内容失败: {url}, 错误: {str(e)}")
             return None, []
@@ -1013,7 +1029,7 @@ def convert_domain_keyword_value(value):
 
     return 'domain_keyword', value
 
-def parse_and_convert_to_dataframe(link):
+def parse_and_convert_to_dataframe(source):
     """抓取并解析一个规则源，返回 (df, 复合规则列表)。
 
     格式一律按内容识别，不看 URL 后缀：靠 .yaml/.txt 后缀路由会让
@@ -1023,8 +1039,15 @@ def parse_and_convert_to_dataframe(link):
     df 为 None 表示这个源没取到（网络错误、非 200、解析异常），
     必须和"取到了但内容为空"区分开。
     """
+    # source 可以是裸链接，也可以是 (链接, 选项) ——
+    # links.txt 的每行可以带自己的开关，见 parse_link_options
+    if isinstance(source, str):
+        link, options = source, {}
+    else:
+        link, options = source
+
     try:
-        return read_list_from_url(link)
+        return read_list_from_url(link, options)
     except Exception as e:
         print(f"处理链接失败: {link}, 错误: {str(e)}")
         return None, []
@@ -1101,10 +1124,10 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
             # df 为 None 表示这个源根本没取到。多个源合并时只要有一个失败，
             # 就必须让整组失败：否则会拿"部分来源"生成一份不完整的规则集，
             # 覆盖掉 Release 上原本完整的那份，订阅方静默少掉一批规则。
-            failed = [link for link, (df, _) in zip(links, results) if df is None]
+            failed = [src for src, (df, _) in zip(links, results) if df is None]
             if failed:
-                for link in failed:
-                    print(f"  来源失败: {link}")
+                for src in failed:
+                    print(f"  来源失败: {src[0] if isinstance(src, tuple) else src}")
                 print(f"{rule_name}: {len(failed)}/{len(links)} 个来源失败，整组跳过以免发布不完整规则集")
                 return None
 
@@ -1461,7 +1484,7 @@ def tag_to_rule_name(tag):
     return tag
 
 
-def expand_tags(url, name):
+def expand_tags(url, name, options=None):
     """按 sing-box 的多 tag 语义展开一行 links.txt。
 
     参照 https://sing-box.sagernet.org/configuration/rule-set/
@@ -1479,11 +1502,13 @@ def expand_tags(url, name):
     tags = [t.strip() for t in name.split(',')] if name else []
     tags = [t for t in tags if t]
 
+    options = dict(options or {})
+
     if not has_placeholder:
         if len(tags) > 1:
             print(f"跳过：设置了多个标签但 url 里没有 {TAG_PLACEHOLDER} 占位符: {url}")
             return []
-        return [(url, name)]
+        return [(url, name, options)]
 
     if not tags:
         print(f"跳过：url 里有 {TAG_PLACEHOLDER} 占位符但没有给出标签: {url}")
@@ -1499,12 +1524,39 @@ def expand_tags(url, name):
             continue
         seen.add(tag)
         # url 里用标签原文（含后缀），规则集名剥掉后缀
-        expanded.append((url.replace(TAG_PLACEHOLDER, tag), tag_to_rule_name(tag)))
+        expanded.append((url.replace(TAG_PLACEHOLDER, tag),
+                         tag_to_rule_name(tag), dict(options)))
 
     if expanded:
         print(f"{TAG_PLACEHOLDER} 展开出 {len(expanded)} 个规则集: "
-              f"{', '.join(t for _, t in expanded)}")
+              f"{', '.join(e[1] for e in expanded)}")
     return expanded
+
+
+# links.txt 每行可以在名称后面跟开关，形如
+#   https://example.com/rules.yaml    MyRule    --no-asn
+LINK_OPTIONS = {
+    '--no-asn': ('asn', False),
+    '--asn': ('asn', True),
+}
+
+
+def parse_link_options(tokens):
+    """从行尾摘出以 -- 开头的开关，返回 (剩余 token, 选项字典)。
+
+    从尾部摘而不是按固定列切：规则名允许含空格，按列切会把
+    "Ai Global" 这样的名字截断。开关一律以 -- 开头，不会和名字混淆。
+    """
+    options = {}
+    rest = list(tokens)
+    while rest and rest[-1].startswith('--'):
+        flag = rest.pop().lower()
+        if flag in LINK_OPTIONS:
+            key, value = LINK_OPTIONS[flag]
+            options[key] = value
+        else:
+            print(f"未知开关 {flag}，已忽略。可用: {', '.join(sorted(LINK_OPTIONS))}")
+    return rest, options
 
 
 def read_links_file():
@@ -1549,10 +1601,12 @@ def read_links_file():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = line.split(maxsplit=1)
-            url = parts[0]
-            name = parts[1].strip() if len(parts) == 2 else None
-            entries.extend(expand_tags(url, name))
+            tokens, options = parse_link_options(line.split())
+            if not tokens:
+                continue
+            url = tokens[0]
+            name = ' '.join(tokens[1:]).strip() or None
+            entries.extend(expand_tags(url, name, options))
 
         return entries
     except Exception as e:
@@ -1660,7 +1714,7 @@ def main():
     # 逐条处理会让先写的文件被后写的整个覆盖。
     grouped = {}
     origin_names = {}
-    for link, name in entries:
+    for link, name, options in entries:
         if not name:
             name = os.path.basename(link).split('.')[0]
 
@@ -1676,8 +1730,9 @@ def main():
         name = safe_name
 
         # 同一个规则名下重复出现同一个 URL 就没必要抓两次
-        if link not in grouped.setdefault(name, []):
-            grouped[name].append(link)
+        sources = grouped.setdefault(name, [])
+        if link not in [u for u, _ in sources]:
+            sources.append((link, options))
 
     for name, count in ((n, len(ls)) for n, ls in grouped.items() if len(ls) > 1):
         print(f"规则 {name} 由 {count} 个源合并生成")
