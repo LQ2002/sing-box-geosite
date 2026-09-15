@@ -1194,9 +1194,17 @@ def parse_list_file(links, rule_name, output_directory, custom_entries=None):
         file_name = os.path.join(output_directory, f"{rule_name}.json")
         
         with open(file_name, 'w', encoding='utf-8') as output_file:
+            # version 放在最前面，跟官方示例一致。
+            # 直接 sort_dict(result_rules) 会按字母序把 rules 排到 version 前面，
+            # 所以只对 rules 排序，顶层两个键自己按顺序写。
+            #
             # 不要再对 json.dumps 的结果做反斜杠替换：
             # 它会把 domain_regex 里合法的 \\ 转义压成单个 \，产出非法 JSON
-            result_rules_str = json.dumps(sort_dict(result_rules), ensure_ascii=False, indent=2)
+            document = {
+                'version': result_rules['version'],
+                'rules': sort_dict(result_rules['rules']),
+            }
+            result_rules_str = json.dumps(document, ensure_ascii=False, indent=2)
             output_file.write(result_rules_str)
 
         srs_path = file_name.replace(".json", ".srs")
