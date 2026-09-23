@@ -90,11 +90,36 @@ jobs:
         set -Eeuo pipefail
 
         # rule 分支每次都是全量强制覆盖，只有一个提交。
-        # 正因为是覆盖，本次生成不完整时绝不能推：
+        # 正因为是覆盖，本次生成不完整时不能直接推：
         # 缺的文件会直接从分支上消失，订阅立刻 404。
+        # 所以缺的那几个从上一版快照里补回来（沿用旧版本），其余照常更新。
+        restored=""
         if [ "${COMPLETE:-false}" != "true" ]; then
-          echo "::warning::本次生成不完整，跳过 $RULE_BRANCH 分支发布，保留上一版快照"
-          exit 0
+          prev="$RUNNER_TEMP/rulebranch-prev"
+          rm -rf "$prev"
+          if ! git clone -q --depth 1 -b "$RULE_BRANCH" \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$prev"; then
+            echo "::error::拿不到上一版 $RULE_BRANCH 分支，无法补齐缺失文件，跳过发布"
+            exit 1
+          fi
+
+          # 以 srs 为准成对补：新产物里 json/srs 不齐（或为空）的，整对用旧的覆盖，
+          # 免得出现新 json 配旧 srs 的混搭
+          for old_srs in "$prev"/*.srs; do
+            [ -e "$old_srs" ] || continue
+            base=$(basename "$old_srs" .srs)
+            if [ -s "./rule/$base.json" ] && [ -s "./rule/$base.srs" ]; then
+              continue
+            fi
+            cp -f "$old_srs" "./rule/$base.srs"
+            if [ -f "$prev/$base.json" ]; then
+              cp -f "$prev/$base.json" "./rule/$base.json"
+            else
+              rm -f "./rule/$base.json"
+            fi
+            restored="$restored $base"
+          done
+          echo "::warning::本次生成不完整，以下规则沿用上一版:${restored:- (上一版里也没有)}"
         fi
 
         # 用算术偏移而不是 TZ=Asia/Shanghai：不依赖运行环境装了 tzdata
@@ -117,6 +142,10 @@ jobs:
           echo "最后更新: $stamp UTC+8"
           echo
           echo "来源提交: $GITHUB_SHA"
+          if [ -n "$restored" ]; then
+            echo
+            echo "本次上游源不可用、沿用上一版的规则:$restored"
+          fi
         } > "$work/README.md"
 
         cd "$work"
@@ -129,3 +158,11 @@ jobs:
           "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
           "HEAD:refs/heads/$RULE_BRANCH"
         echo "已强制覆盖分支 $RULE_BRANCH（$(ls -1 | wc -l) 个文件）"
+
+    # 不完整时上面照样发布了（缺的沿用旧版），但任务要标红，
+    # 否则上游源挂了也是一片绿，没人会发现
+    - name: Fail if build was incomplete
+      if: env.COMPLETE != 'true'
+      run: |
+        echo "::error::本次有规则生成失败，已沿用上一版发布，请检查上游源"
+        exit 1
