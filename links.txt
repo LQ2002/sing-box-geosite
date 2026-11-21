@@ -9,3 +9,4 @@ https://static-file-global.353355.xyz/rules/cn-additional-list-clash-classical.y
 https://raw.githubusercontent.com/NobyDa/Script/master/Surge/WeChat.list WeChat
 https://raw.githubusercontent.com/wwqgtxx/clash-rules/refs/heads/release/direct.yaml CN_Direct
 https://raw.githubusercontent.com/VPSDance/ai-proxy-rules/main/rules/clash/global.yaml Ai-Global!cn --no-asn
+https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/refs/heads/master/rule/Clash/Google/Google.yaml Google
